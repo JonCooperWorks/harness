@@ -63,3 +63,37 @@ func (k *KeychainKeystore) GetPrivateKey(keyID string) (*ecdsa.PrivateKey, error
 	return ecKey, nil
 }
 
+// SetPrivateKey stores an ECDSA private key in macOS Keychain
+func (k *KeychainKeystore) SetPrivateKey(keyID string, privateKey *ecdsa.PrivateKey) error {
+	// Encode private key to PEM format (PKCS8)
+	privateKeyBytes, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		return fmt.Errorf("failed to marshal private key: %w", err)
+	}
+
+	privateKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: privateKeyBytes,
+	})
+
+	// Store in keychain
+	err = k.ring.Set(keyring.Item{
+		Key:  keyID,
+		Data: privateKeyPEM,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to store key in keychain: %w", err)
+	}
+
+	return nil
+}
+
+// ListKeys returns all key IDs stored in macOS Keychain
+func (k *KeychainKeystore) ListKeys() ([]string, error) {
+	keys, err := k.ring.Keys()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list keys from keychain: %w", err)
+	}
+	return keys, nil
+}
+

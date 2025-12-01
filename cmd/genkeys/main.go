@@ -9,14 +9,21 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"github.com/joncooperworks/harness/crypto/keystore"
 )
 
 func main() {
 	var (
-		privateKeyPath = flag.String("private", "private.pem", "Path to save private key")
 		publicKeyPath = flag.String("public", "public.pem", "Path to save public key")
+		keystoreKeyID = flag.String("keystore-key", "", "Key ID to store private key in OS keystore (required)")
 	)
 	flag.Parse()
+
+	if *keystoreKeyID == "" {
+		fmt.Fprintf(os.Stderr, "Error: -keystore-key is required\n")
+		os.Exit(1)
+	}
 
 	// Generate ECDSA key pair
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -25,19 +32,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Encode private key
-	privateKeyBytes, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	// Store private key directly in keystore (never write to disk)
+	ks, err := keystore.NewKeystore()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling private key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
 		os.Exit(1)
 	}
 
-	privateKeyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "PRIVATE KEY",
-		Bytes: privateKeyBytes,
-	})
+	if err := ks.SetPrivateKey(*keystoreKeyID, privateKey); err != nil {
+		fmt.Fprintf(os.Stderr, "Error storing key in keystore: %v\n", err)
+		os.Exit(1)
+	}
 
-	// Encode public key
+	// Encode and write public key only
 	publicKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error marshaling public key: %v\n", err)
@@ -49,20 +56,14 @@ func main() {
 		Bytes: publicKeyBytes,
 	})
 
-	// Write private key
-	if err := os.WriteFile(*privateKeyPath, privateKeyPEM, 0600); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing private key: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Write public key
 	if err := os.WriteFile(*publicKeyPath, publicKeyPEM, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing public key: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Keys generated successfully:\n")
-	fmt.Printf("  Private key: %s\n", *privateKeyPath)
-	fmt.Printf("  Public key: %s\n", *publicKeyPath)
+	fmt.Printf("Key pair generated successfully:\n")
+	fmt.Printf("  Private key stored in keystore with ID: %s\n", *keystoreKeyID)
+	fmt.Printf("  Public key written to: %s\n", *publicKeyPath)
 }
+
 

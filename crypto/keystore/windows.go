@@ -60,3 +60,37 @@ func (w *WindowsKeystore) GetPrivateKey(keyID string) (*ecdsa.PrivateKey, error)
 	return ecKey, nil
 }
 
+// SetPrivateKey stores an ECDSA private key in Windows Credential Store
+func (w *WindowsKeystore) SetPrivateKey(keyID string, privateKey *ecdsa.PrivateKey) error {
+	// Encode private key to PEM format (PKCS8)
+	privateKeyBytes, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		return fmt.Errorf("failed to marshal private key: %w", err)
+	}
+
+	privateKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: privateKeyBytes,
+	})
+
+	// Store in credential store
+	err = w.ring.Set(keyring.Item{
+		Key:  keyID,
+		Data: privateKeyPEM,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to store key in credential store: %w", err)
+	}
+
+	return nil
+}
+
+// ListKeys returns all key IDs stored in Windows Credential Store
+func (w *WindowsKeystore) ListKeys() ([]string, error) {
+	keys, err := w.ring.Keys()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list keys from credential store: %w", err)
+	}
+	return keys, nil
+}
+

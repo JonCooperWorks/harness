@@ -28,10 +28,12 @@ Generate keys for the president (who signs plugins) and the harness (who execute
 
 ```bash
 # Generate president's keys (for signing)
-./bin/genkeys -private president_private.pem -public president_public.pem
+# Private key stored in keystore, only public key written to disk
+./bin/genkeys -keystore-key "president-key-id" -public president_public.pem
 
 # Generate harness keys (for decryption)
-./bin/genkeys -private harness_private.pem -public harness_public.pem
+# Private key stored in keystore, only public key written to disk
+./bin/genkeys -keystore-key "harness-key-id" -public harness_public.pem
 ```
 
 ### 2. Create a WASM Plugin
@@ -83,13 +85,33 @@ Run the harness to load and execute the plugin:
 
 ## Using OS Keystore
 
-Instead of storing keys in files, you can use the OS keystore:
+Instead of storing keys in files, you can use the OS keystore for secure key storage.
 
-### macOS Keychain
+### Storing Keys in Keystore
+
+**Option 1: Generate and store a new key (recommended)**
 
 ```bash
-# Store key in Keychain (manual step - use keychain access or keyring library)
-# Then use:
+# Generate a new key pair, store private key in keystore, output only public key
+./bin/genkeys \
+  -keystore-key "harness-key-id" \
+  -public harness_public.pem
+```
+
+The private key is stored directly in the OS keystore and never written to disk.
+
+**List keys in keystore**
+
+```bash
+# List all key IDs stored in the keystore
+./bin/listkeys
+```
+
+### Using Keys from Keystore
+
+Once a key is stored in the keystore, use it with the harness:
+
+```bash
 ./bin/harness \
   -file my-plugin.encrypted \
   -keystore-key "harness-key-id" \
@@ -97,13 +119,11 @@ Instead of storing keys in files, you can use the OS keystore:
   -args '{}'
 ```
 
-### Linux Keyring
+### Platform Support
 
-Similar process using the Linux keyring (libsecret).
-
-### Windows Credential Store
-
-Similar process using Windows Credential Manager.
+- **macOS**: Uses Keychain Access (service: `harness`, keychain: `harness-keys`)
+- **Linux**: Uses libsecret/keyring (service: `harness`)
+- **Windows**: Uses Credential Manager (service: `harness`)
 
 ## Architecture
 
@@ -133,23 +153,21 @@ type Plugin interface {
 }
 ```
 
-## Example: Test Plugin
-
-A simple test plugin is included in `plugin/test/`:
+## Example: Using a WASM Plugin
 
 ```bash
 # Sign a WASM plugin
 ./bin/sign \
   -plugin my-plugin.wasm \
   -type wasm \
-  -name test-plugin \
+  -name my-plugin \
   -president-key president_private.pem \
   -harness-key harness_public.pem \
-  -output test-plugin.encrypted
+  -output my-plugin.encrypted
 
 # Execute it
 ./bin/harness \
-  -file test-plugin.encrypted \
+  -file my-plugin.encrypted \
   -key harness_private.pem \
   -president-key president_public.pem \
   -args '{"message":"Hello World","count":3}'

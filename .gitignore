@@ -31,10 +31,14 @@ go.work
 *.a
 *.o
 
-# Test files (uncomment if you want to ignore test artifacts)
+# Test files and build artifacts
 *.encrypted
 *.wasm
 test-plugin.txt
+
+# Rust build artifacts
+**/target/
+**/Cargo.lock
 
 # Environment files
 .env
