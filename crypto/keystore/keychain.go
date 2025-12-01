@@ -25,11 +25,11 @@ func NewKeychainKeystore() (Keystore, error) {
 	keychainName := os.Getenv("HARNESS_KEYCHAIN")
 	// If not set, default to empty (login keychain) to avoid double password prompts
 	// Set HARNESS_KEYCHAIN="harness-keys" to use the custom keychain
-	
+
 	ring, err := keyring.Open(keyring.Config{
 		ServiceName:              "harness",
 		KeychainName:             keychainName, // Empty = default login keychain, "harness-keys" = custom keychain
-		KeychainPasswordFunc:     nil,         // Use default keychain
+		KeychainPasswordFunc:     nil,          // Use default keychain
 		KeychainTrustApplication: true,
 		// Use login keychain by default (unlocked when logged in, fewer prompts)
 		// Only prompt if using a custom keychain that requires unlocking
@@ -105,4 +105,3 @@ func (k *KeychainKeystore) ListKeys() ([]string, error) {
 	}
 	return keys, nil
 }
-
