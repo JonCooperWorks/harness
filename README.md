@@ -371,24 +371,30 @@ All commands support keystore-based keys:
 
 ### Cryptographic Flow
 
-1. **Signing Exploit** (Principal):
+1. **Encrypting Exploit** (Encrypt command):
    - Generate symmetric key (AES-256)
    - Encrypt exploit payload with symmetric key (AES-256-GCM)
-   - Sign metadata + encrypted data with principal's private key (ECDSA)
-   - Store in exploit stockpile (reusable)
+   - Encrypt symmetric key with client's public key (ECDH)
+   - Create metadata and write encrypted file (without signature)
+   - Store in exploit stockpile (reusable, unsigned)
 
-2. **Signing Arguments** (Client):
+2. **Signing Exploit** (Principal, Sign command):
+   - Read encrypted file from stockpile
+   - Sign metadata + encrypted data with principal's private key (ECDSA)
+   - Prepend signature to encrypted file
+   - Creates signed exploit ready for distribution
+
+3. **Signing Arguments** (Client):
    - Client creates execution arguments (targeting info: IPs, ports, etc.)
    - Sign arguments JSON with client's private key (ECDSA)
    - This signature proves client approval of targeting
 
-3. **Verification & Execution** (Harness):
+4. **Verification & Execution** (Harness):
    - Verify principal's signature on exploit payload
    - Verify client's signature on execution arguments
    - Decrypt exploit data with symmetric key (AES-256-GCM)
-   - Load WASM module and execute with signed arguments
    - Load WASM module into sandbox
-   - Execute with provided arguments
+   - Execute with signed arguments
 
 ### Encrypted File Format Specification
 
