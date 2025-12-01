@@ -150,12 +150,13 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 
 ### Execution Requirements
 
-Execution is **cryptographically impossible** without both:
+Execution is **cryptographically impossible** without all of the following:
 
 1. ✓ Exploit encrypted with pentester's public key (principal authorization - they have the exploit)
-2. ✓ Valid client signature on execution arguments (client authorization - they approve usage)
+2. ✓ Valid client signature on expiration + execution arguments (client authorization - they approve usage)
+3. ✓ Expiration has not passed (time-based authorization - prevents stale approvals)
 
-Both authorizations must be present. Missing either results in immediate failure. **Nobody can run an exploit unilaterally** - principal has exploit but no authorization, client has authorization but no exploit, pentester can decrypt but needs both.
+All conditions must be met. Missing any results in immediate failure. **Nobody can run an exploit unilaterally** - principal has exploit but no authorization, client has authorization but no exploit, pentester can decrypt but needs both authorizations and valid expiration.
 
 ### Keystore Interface
 
@@ -386,13 +387,15 @@ All commands support keystore-based keys:
 
 2. **Signing Arguments** (Client, Sign command):
    - Client receives encrypted payload and execution arguments
-   - Client signs the execution arguments with client's private key (ECDSA)
-   - Append client signature and arguments to encrypted file
+   - Client sets expiration time (default: 3 days from signing)
+   - Client signs expiration + execution arguments with client's private key (ECDSA)
+   - Append client signature, expiration timestamp, and arguments to encrypted file
    - Return approved payload to pentester
    - **Client cannot decrypt** - they have authorization power but not the exploit
 
 3. **Verification & Execution** (Pentester, Harness):
-   - Verify client's signature on execution arguments
+   - Verify expiration has not passed (reject if expired)
+   - Verify client's signature on expiration + execution arguments
    - Decrypt symmetric key with pentester's private key (ECDH)
    - Decrypt exploit data with symmetric key (AES-256-GCM)
    - Load WASM module directly into sandbox (pentester never sees plaintext)

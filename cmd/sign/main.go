@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"time"
 
 	"github.com/joncooperworks/harness/crypto/keystore"
 )
@@ -20,6 +21,7 @@ func main() {
 		encryptedFile = flag.String("file", "", "Path to encrypted plugin file (from encrypt command)")
 		clientKeyID   = flag.String("client-keystore-key", "", "Key ID in OS keystore for client's private key (required)")
 		argsJSON      = flag.String("args", "", "JSON arguments to sign (required)")
+		expirationDur = flag.Duration("expiration", 72*time.Hour, "Expiration duration from now (default: 72h = 3 days)")
 		outputPath    = flag.String("output", "", "Path to save approved plugin (defaults to input file with .approved suffix)")
 	)
 	flag.Parse()
@@ -69,9 +71,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Sign the arguments with client's private key
+	// Calculate expiration timestamp (Unix timestamp in seconds)
+	expirationTime := time.Now().Add(*expirationDur)
+	expirationUnix := expirationTime.Unix()
+
+	// Sign expiration + arguments together
 	argsBytes := []byte(*argsJSON)
-	hash := sha256.Sum256(argsBytes)
+	// Create data to sign: expiration (8 bytes) + args_json
+	dataToSign := make([]byte, 8+len(argsBytes))
+	binary.BigEndian.PutUint64(dataToSign[0:8], uint64(expirationUnix))
+	copy(dataToSign[8:], argsBytes)
+	
+	hash := sha256.Sum256(dataToSign)
 	r, s, err := ecdsa.Sign(rand.Reader, clientKey, hash[:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error signing arguments: %v\n", err)
@@ -88,7 +99,7 @@ func main() {
 	}
 
 	// Build final approved file structure:
-	// [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][args_len:4][args_json]
+	// [encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
 	var output []byte
 
 	// Write encrypted payload (already in correct format)
@@ -101,6 +112,11 @@ func main() {
 
 	// Write client signature
 	output = append(output, signature...)
+
+	// Write expiration timestamp (Unix timestamp, 8 bytes)
+	expirationBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(expirationBuf, uint64(expirationUnix))
+	output = append(output, expirationBuf...)
 
 	// Write args length
 	argsLenBuf := make([]byte, 4)
@@ -120,4 +136,5 @@ func main() {
 	fmt.Printf("  Input: %s\n", *encryptedFile)
 	fmt.Printf("  Output: %s\n", *outputPath)
 	fmt.Printf("  Arguments: %s\n", *argsJSON)
+	fmt.Printf("  Expiration: %s (%s)\n", expirationTime.Format(time.RFC3339), expirationTime.Format(time.RFC1123))
 }

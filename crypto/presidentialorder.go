@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"time"
 
 	"github.com/joncooperworks/harness/crypto/keystore"
 )
@@ -99,20 +100,20 @@ func NewPresidentialOrderFromFile(privateKeyPath string, clientPubKey *ecdsa.Pub
 }
 
 // VerifyAndDecrypt verifies the client signature on arguments and decrypts the payload
-// File format: [encrypted_payload][client_sig_len:4][client_sig][args_len:4][args_json]
+// File format: [encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
 // Encrypted payload format: [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []byte) (*Payload, error) {
 	if len(fileData) < 12 {
 		return nil, errors.New("file too short")
 	}
 
-	// Parse from the end: read client signature and args
-	// File format: [encrypted_payload][client_sig_len:4][client_sig][args_len:4][args_json]
+	// Parse from the end: read client signature, expiration, and args
+	// File format: [encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
 	argsJSONBytes := []byte(argsJSON)
 	argsLen := len(argsJSONBytes)
 
 	// Find args in the file (should be at the end)
-	if len(fileData) < argsLen+4 {
+	if len(fileData) < argsLen+4+8 {
 		return nil, errors.New("file too short")
 	}
 
@@ -135,6 +136,19 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 		return nil, fmt.Errorf("args length mismatch: file has %d bytes, provided %d bytes", argsLenFromFile, argsLen)
 	}
 
+	// Read expiration (8 bytes before args_len)
+	expirationPos := argsLenPos - 8
+	if expirationPos < 0 {
+		return nil, errors.New("file too short for expiration")
+	}
+	expirationUnix := int64(binary.BigEndian.Uint64(fileData[expirationPos : expirationPos+8]))
+	expirationTime := time.Unix(expirationUnix, 0)
+	
+	// Verify expiration has not passed
+	if time.Now().After(expirationTime) {
+		return nil, fmt.Errorf("payload has expired: expiration was %s, current time is %s", expirationTime.Format(time.RFC3339), time.Now().Format(time.RFC3339))
+	}
+
 	// Now we need to find the signature. The signature is before args_len.
 	// We know the structure is: [payload][sig_len:4][sig][args_len:4][args]
 	// So sig ends at argsLenPos, and sig_len is 4 bytes before sig starts.
@@ -142,21 +156,22 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 	// ECDSA P-256 signatures are typically 70-72 bytes in ASN.1 DER format.
 
 	// Try to find sig_len by looking for reasonable values (60-80 bytes)
-	// Start from argsLenPos and work backwards
+	// Start from expirationPos and work backwards
+	// Structure: [sig_len:4][sig][expiration:8][args_len:4][args]
 	foundSigLen := false
 	var clientSigLen int
 	var sigLenPos int
-	for offset := 4; offset < argsLenPos && offset < 200; offset += 1 {
-		pos := argsLenPos - offset - 4
+	for offset := 4; offset < expirationPos && offset < 200; offset += 1 {
+		pos := expirationPos - offset - 4
 		if pos < 0 {
 			break
 		}
 		sigLenCandidate := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
 		if sigLenCandidate >= 60 && sigLenCandidate <= 80 {
-			// Check if sig + sig_len + args_len + args would match
+			// Check if sig + sig_len + expiration + args_len + args would match
 			sigStart := pos + 4
 			sigEnd := sigStart + sigLenCandidate
-			if sigEnd == argsLenPos {
+			if sigEnd == expirationPos {
 				clientSigLen = sigLenCandidate
 				sigLenPos = pos
 				foundSigLen = true
@@ -171,21 +186,27 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 
 	// Read client signature
 	sigPos := sigLenPos + 4
-	if sigPos+clientSigLen != argsLenPos {
-		return nil, fmt.Errorf("signature position mismatch: expected sig to end at %d, but args_len starts at %d", sigPos+clientSigLen, argsLenPos)
+	// Signature should end at expirationPos (8 bytes before argsLenPos)
+	if sigPos+clientSigLen != expirationPos {
+		return nil, fmt.Errorf("signature position mismatch: expected sig to end at %d, but expiration starts at %d", sigPos+clientSigLen, expirationPos)
 	}
 	clientSignature := fileData[sigPos : sigPos+clientSigLen]
 	offset := sigLenPos
 
-	// Verify client signature on arguments
-	argsHash := sha256.Sum256(argsJSON)
+	// Verify client signature on expiration + arguments
+	// Signature covers: expiration (8 bytes) + args_json
+	dataToVerify := make([]byte, 8+len(argsJSONBytes))
+	binary.BigEndian.PutUint64(dataToVerify[0:8], uint64(expirationUnix))
+	copy(dataToVerify[8:], argsJSONBytes)
+	
+	dataHash := sha256.Sum256(dataToVerify)
 	var sig struct {
 		R, S *big.Int
 	}
 	if _, err := asn1.Unmarshal(clientSignature, &sig); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal client signature: %w", err)
 	}
-	if !ecdsa.Verify(po.clientPubKey, argsHash[:], sig.R, sig.S) {
+	if !ecdsa.Verify(po.clientPubKey, dataHash[:], sig.R, sig.S) {
 		return nil, errors.New("client signature verification failed")
 	}
 
