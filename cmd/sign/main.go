@@ -4,11 +4,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/asn1"
 	"encoding/binary"
 	"encoding/json"
-	"encoding/pem"
 	"flag"
 	"fmt"
 	"math/big"
@@ -19,10 +17,9 @@ import (
 
 func main() {
 	var (
-		encryptedFile      = flag.String("file", "", "Path to encrypted plugin file (from encrypt command)")
-		presidentKeyPath   = flag.String("president-key", "", "Path to president's private key file (optional if using keystore)")
-		presidentKeyID     = flag.String("president-keystore-key", "", "Key ID in OS keystore for president's private key (optional if using key file)")
-		outputPath         = flag.String("output", "", "Path to save signed plugin (defaults to input file with .signed suffix)")
+		encryptedFile  = flag.String("file", "", "Path to encrypted plugin file (from encrypt command)")
+		presidentKeyID = flag.String("president-keystore-key", "", "Key ID in OS keystore for president's private key (required)")
+		outputPath     = flag.String("output", "", "Path to save signed plugin (defaults to input file with .signed suffix)")
 	)
 	flag.Parse()
 
@@ -31,8 +28,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *presidentKeyPath == "" && *presidentKeyID == "" {
-		fmt.Fprintf(os.Stderr, "Error: either -president-key or -president-keystore-key must be provided\n")
+	if *presidentKeyID == "" {
+		fmt.Fprintf(os.Stderr, "Error: -president-keystore-key is required (private keys must be stored in OS keystore)\n")
 		os.Exit(1)
 	}
 
@@ -40,26 +37,16 @@ func main() {
 		*outputPath = *encryptedFile + ".signed"
 	}
 
-	// Load president's private key (for signing)
-	var presidentKey *ecdsa.PrivateKey
-	var err error
-	if *presidentKeyID != "" {
-		ks, err := keystore.NewKeystore()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
-			os.Exit(1)
-		}
-		presidentKey, err = ks.GetPrivateKey(*presidentKeyID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading president's private key from keystore: %v\n", err)
-			os.Exit(1)
-		}
-	} else {
-		presidentKey, err = loadPrivateKey(*presidentKeyPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading president's private key: %v\n", err)
-			os.Exit(1)
-		}
+	// Load president's private key from keystore
+	ks, err := keystore.NewKeystore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
+		os.Exit(1)
+	}
+	presidentKey, err := ks.GetPrivateKey(*presidentKeyID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading president's private key from keystore: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Load encrypted file
@@ -79,7 +66,7 @@ func main() {
 	offset := 0
 
 	// Read metadata length
-	metadataLen := int(binary.BigEndian.Uint32(encryptedData[offset:offset+4]))
+	metadataLen := int(binary.BigEndian.Uint32(encryptedData[offset : offset+4]))
 	offset += 4
 
 	if len(encryptedData) < offset+metadataLen {
@@ -88,7 +75,7 @@ func main() {
 	}
 
 	// Read metadata
-	metadataJSON := encryptedData[offset:offset+metadataLen]
+	metadataJSON := encryptedData[offset : offset+metadataLen]
 	offset += metadataLen
 
 	// Parse metadata to get lengths
@@ -109,9 +96,9 @@ func main() {
 	}
 
 	// Extract encrypted symmetric key and plugin data
-	encryptedSymmetricKey := encryptedData[offset:offset+metadataStruct.SymmetricKeyLen]
+	encryptedSymmetricKey := encryptedData[offset : offset+metadataStruct.SymmetricKeyLen]
 	offset += metadataStruct.SymmetricKeyLen
-	encryptedPluginData := encryptedData[offset:offset+metadataStruct.PluginDataLen]
+	encryptedPluginData := encryptedData[offset : offset+metadataStruct.PluginDataLen]
 
 	// Create data to sign: metadata + encrypted data
 	dataToSign := append(metadataJSON, encryptedSymmetricKey...)
@@ -170,36 +157,3 @@ func main() {
 	fmt.Printf("  Input: %s\n", *encryptedFile)
 	fmt.Printf("  Output: %s\n", *outputPath)
 }
-
-// loadPrivateKey loads an ECDSA private key from a file
-func loadPrivateKey(path string) (*ecdsa.PrivateKey, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read private key file: %w", err)
-	}
-
-	// Try PEM format first
-	block, _ := pem.Decode(data)
-	if block != nil {
-		data = block.Bytes
-	}
-
-	// Try PKCS8 format
-	key, err := x509.ParsePKCS8PrivateKey(data)
-	if err == nil {
-		if ecdsaKey, ok := key.(*ecdsa.PrivateKey); ok {
-			return ecdsaKey, nil
-		}
-		return nil, fmt.Errorf("key is not ECDSA")
-	}
-
-	// Try EC private key format
-	ecKey, err := x509.ParseECPrivateKey(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key: %w", err)
-	}
-
-	return ecKey, nil
-}
-
-

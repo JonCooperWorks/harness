@@ -14,8 +14,7 @@ import (
 func main() {
 	var (
 		encryptedFile      = flag.String("file", "", "Path to encrypted plugin file")
-		privateKeyFile     = flag.String("key", "", "Path to private key file (optional if using keystore)")
-		keystoreKeyID      = flag.String("keystore-key", "", "Key ID in OS keystore (optional if using key file)")
+		keystoreKeyID      = flag.String("keystore-key", "", "Key ID in OS keystore (required)")
 		presidentPubKeyFile = flag.String("president-key", "", "Path to president's public key file")
 	)
 	flag.Parse()
@@ -25,14 +24,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *presidentPubKeyFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -president-key is required\n")
+	if *keystoreKeyID == "" {
+		fmt.Fprintf(os.Stderr, "Error: -keystore-key is required (private keys must be stored in OS keystore)\n")
 		os.Exit(1)
 	}
 
-	if *privateKeyFile == "" && *keystoreKeyID == "" {
-		fmt.Fprintf(os.Stderr, "Error: -keystore-key is required (private keys should be stored in OS keystore, not files)\n")
-		fmt.Fprintf(os.Stderr, "  Use -key only for migration purposes\n")
+	if *presidentPubKeyFile == "" {
+		fmt.Fprintf(os.Stderr, "Error: -president-key is required\n")
 		os.Exit(1)
 	}
 
@@ -43,20 +41,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create PresidentialOrder
-	var po crypto.PresidentialOrder
-	if *keystoreKeyID != "" {
-		po, err = crypto.NewPresidentialOrderFromKeystore(*keystoreKeyID, presidentPubKey)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating PresidentialOrder from keystore: %v\n", err)
-			os.Exit(1)
-		}
-	} else {
-		po, err = crypto.NewPresidentialOrderFromFile(*privateKeyFile, presidentPubKey)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating PresidentialOrder: %v\n", err)
-			os.Exit(1)
-		}
+	// Create PresidentialOrder from keystore
+	po, err := crypto.NewPresidentialOrderFromKeystore(*keystoreKeyID, presidentPubKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating PresidentialOrder from keystore: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Load encrypted file

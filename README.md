@@ -303,7 +303,7 @@ Without both signatures, execution fails cryptographically.
   -public client_harness_public.pem
 ```
 
-**Import existing PEM keys** (migration):
+**Import existing PEM keys** (one-time import into keystore):
 
 ```bash
 # Import an existing private key file into the keystore
