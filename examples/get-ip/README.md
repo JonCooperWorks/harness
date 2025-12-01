@@ -13,19 +13,19 @@ The compiled WASM will be at: `target/wasm32-wasip1/release/get_ip_plugin.wasm`
 ## Signing and Running
 
 ```bash
-# Sign the plugin
+# Sign the plugin using keystore
 ./bin/sign \
   -plugin examples/get-ip/target/wasm32-wasip1/release/get_ip_plugin.wasm \
   -type wasm \
   -name get-ip-plugin \
-  -president-key president_private.pem \
+  -president-keystore-key "president-key" \
   -harness-key harness_public.pem \
   -output get-ip-plugin.encrypted
 
-# Run the plugin
+# Run the plugin using keystore
 ./bin/harness \
   -file get-ip-plugin.encrypted \
-  -key harness_private.pem \
+  -keystore-key "harness-key" \
   -president-key president_public.pem \
   -args '{}'
 ```

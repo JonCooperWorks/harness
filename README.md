@@ -24,16 +24,29 @@ go build -o bin/verify ./cmd/verify
 
 ### 1. Generate Keys
 
-Generate keys for the president (who signs plugins) and the harness (who executes them):
+Generate keys for the president (who signs plugins) and the harness (who executes them). **Private keys are stored in the OS keystore and never written to disk.**
 
 ```bash
 # Generate president's keys (for signing)
 # Private key stored in keystore, only public key written to disk
-./bin/genkeys -keystore-key "president-key-id" -public president_public.pem
+./bin/genkeys -keystore-key "president-key" -public president_public.pem
 
 # Generate harness keys (for decryption)
 # Private key stored in keystore, only public key written to disk
-./bin/genkeys -keystore-key "harness-key-id" -public harness_public.pem
+./bin/genkeys -keystore-key "harness-key" -public harness_public.pem
+
+# List all keys in keystore
+./bin/listkeys
+```
+
+**Note**: If you have existing PEM private key files, you can import them into the keystore:
+
+```bash
+# Import existing private key into keystore
+./bin/storekey -key president_private.pem -keystore-key "president-key"
+./bin/storekey -key harness_private.pem -keystore-key "harness-key"
+
+# After importing, you can safely delete the PEM files
 ```
 
 ### 2. Create a WASM Plugin
@@ -48,14 +61,14 @@ See the WASM loader implementation for details on the expected interface.
 
 ### 3. Sign and Encrypt Plugin
 
-The president signs and encrypts the plugin:
+The president signs and encrypts the plugin using a key from the keystore:
 
 ```bash
 ./bin/sign \
   -plugin my-plugin.wasm \
   -type wasm \
   -name my-plugin \
-  -president-key president_private.pem \
+  -president-keystore-key "president-key" \
   -harness-key harness_public.pem \
   -output my-plugin.encrypted
 ```
@@ -67,40 +80,49 @@ Verify the encrypted plugin without executing it:
 ```bash
 ./bin/verify \
   -file my-plugin.encrypted \
-  -key harness_private.pem \
+  -keystore-key "harness-key" \
   -president-key president_public.pem
 ```
 
 ### 5. Execute Plugin
 
-Run the harness to load and execute the plugin:
+Run the harness to load and execute the plugin using a key from the keystore:
 
 ```bash
 ./bin/harness \
   -file my-plugin.encrypted \
-  -key harness_private.pem \
+  -keystore-key "harness-key" \
   -president-key president_public.pem \
   -args '{"message":"Hello","count":1}'
 ```
 
-## Using OS Keystore
+## OS Keystore Integration
 
-Instead of storing keys in files, you can use the OS keystore for secure key storage.
+**All private keys are stored in the OS keystore and never written to disk.** This provides secure key storage using platform-native security features.
 
-### Storing Keys in Keystore
+### Key Management
 
-**Option 1: Generate and store a new key (recommended)**
+**Generate new keys** (recommended):
 
 ```bash
 # Generate a new key pair, store private key in keystore, output only public key
 ./bin/genkeys \
-  -keystore-key "harness-key-id" \
+  -keystore-key "harness-key" \
   -public harness_public.pem
 ```
 
-The private key is stored directly in the OS keystore and never written to disk.
+**Import existing PEM keys** (migration):
 
-**List keys in keystore**
+```bash
+# Import an existing private key file into the keystore
+./bin/storekey \
+  -key existing_private.pem \
+  -keystore-key "harness-key"
+
+# After importing, you can safely delete the PEM file
+```
+
+**List keys in keystore**:
 
 ```bash
 # List all key IDs stored in the keystore
@@ -109,21 +131,43 @@ The private key is stored directly in the OS keystore and never written to disk.
 
 ### Using Keys from Keystore
 
-Once a key is stored in the keystore, use it with the harness:
+All commands support keystore-based keys:
 
 ```bash
+# Sign a plugin using keystore
+./bin/sign \
+  -plugin my-plugin.wasm \
+  -president-keystore-key "president-key" \
+  -harness-key harness_public.pem \
+  -output my-plugin.encrypted
+
+# Verify a plugin using keystore
+./bin/verify \
+  -file my-plugin.encrypted \
+  -keystore-key "harness-key" \
+  -president-key president_public.pem
+
+# Execute a plugin using keystore
 ./bin/harness \
   -file my-plugin.encrypted \
-  -keystore-key "harness-key-id" \
+  -keystore-key "harness-key" \
   -president-key president_public.pem \
   -args '{}'
 ```
 
 ### Platform Support
 
-- **macOS**: Uses Keychain Access (service: `harness`, keychain: `harness-keys`)
+- **macOS**: Uses Keychain Access (service: `harness`)
+  - Default: Uses login keychain (unlocked when logged in, fewer prompts)
+  - Custom: Set `HARNESS_KEYCHAIN="harness-keys"` to use custom keychain
+  - Example: `export HARNESS_KEYCHAIN="harness-keys"` before running commands
 - **Linux**: Uses libsecret/keyring (service: `harness`)
 - **Windows**: Uses Credential Manager (service: `harness`)
+
+**macOS Keychain Configuration:**
+- **Default (recommended)**: No environment variable = uses login keychain (fewer password prompts)
+- **Custom keychain**: Set `export HARNESS_KEYCHAIN="harness-keys"` to use the custom "harness-keys" keychain
+- Note: If you have existing keys in "harness-keys", set the environment variable to access them
 
 ## Architecture
 
@@ -156,19 +200,19 @@ type Plugin interface {
 ## Example: Using a WASM Plugin
 
 ```bash
-# Sign a WASM plugin
+# Sign a WASM plugin using keystore
 ./bin/sign \
   -plugin my-plugin.wasm \
   -type wasm \
   -name my-plugin \
-  -president-key president_private.pem \
+  -president-keystore-key "president-key" \
   -harness-key harness_public.pem \
   -output my-plugin.encrypted
 
-# Execute it
+# Execute it using keystore
 ./bin/harness \
   -file my-plugin.encrypted \
-  -key harness_private.pem \
+  -keystore-key "harness-key" \
   -president-key president_public.pem \
   -args '{"message":"Hello World","count":3}'
 ```
@@ -180,11 +224,12 @@ type Plugin interface {
 
 ## Security Considerations
 
-- Private keys should be stored securely (use OS keystore when possible)
+- **Private keys are stored in OS keystore** - never written to disk
 - President's public key should be distributed securely
 - Encrypted plugins can be distributed over insecure channels
 - Signature verification ensures plugin authenticity
 - Encryption ensures plugin confidentiality
+- File-based private keys (`-key` flag) are deprecated and only supported for migration purposes
 
 ## License
 

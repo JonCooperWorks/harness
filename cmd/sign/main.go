@@ -17,6 +17,7 @@ import (
 	"os"
 
 	"github.com/joncooperworks/harness/crypto"
+	"github.com/joncooperworks/harness/crypto/keystore"
 )
 
 func main() {
@@ -24,7 +25,8 @@ func main() {
 		pluginFile         = flag.String("plugin", "", "Path to plugin file to encrypt")
 		pluginType         = flag.String("type", "wasm", "Plugin type: wasm")
 		pluginName         = flag.String("name", "test-plugin", "Plugin name")
-		presidentKeyPath   = flag.String("president-key", "", "Path to president's private key (for signing)")
+		presidentKeyPath   = flag.String("president-key", "", "Path to president's private key file (optional if using keystore)")
+		presidentKeyID     = flag.String("president-keystore-key", "", "Key ID in OS keystore for president's private key (optional if using key file)")
 		harnessPubKeyPath  = flag.String("harness-key", "", "Path to harness's public key (for encryption)")
 		outputPath         = flag.String("output", "plugin.encrypted", "Path to save encrypted plugin")
 	)
@@ -35,8 +37,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *presidentKeyPath == "" {
-		fmt.Fprintf(os.Stderr, "Error: -president-key is required\n")
+	if *presidentKeyPath == "" && *presidentKeyID == "" {
+		fmt.Fprintf(os.Stderr, "Error: either -president-key or -president-keystore-key must be provided\n")
 		os.Exit(1)
 	}
 
@@ -46,10 +48,25 @@ func main() {
 	}
 
 	// Load president's private key (for signing)
-	presidentKey, err := loadPrivateKey(*presidentKeyPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading president's private key: %v\n", err)
-		os.Exit(1)
+	var presidentKey *ecdsa.PrivateKey
+	var err error
+	if *presidentKeyID != "" {
+		ks, err := keystore.NewKeystore()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
+			os.Exit(1)
+		}
+		presidentKey, err = ks.GetPrivateKey(*presidentKeyID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading president's private key from keystore: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		presidentKey, err = loadPrivateKey(*presidentKeyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading president's private key: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Load harness's public key (for encryption)

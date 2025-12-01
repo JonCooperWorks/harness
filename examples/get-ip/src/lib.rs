@@ -18,8 +18,11 @@ pub fn json_schema() -> FnResult<String> {
 
 #[plugin_fn]
 pub fn execute() -> FnResult<Json<Value>> {
-    // Read input JSON args (if any) - ignore errors if no input
-    let _input: Result<Json<Value>, _> = input();
+    // Read input JSON args
+    let input: Json<Value> = input()?;
+    
+    // Print args to output (will be visible in console/logs)
+    // Args are included in the response below
     
     // Make HTTP request to ipconfig.io
     let req = HttpRequest::new("https://ipconfig.io/json")
@@ -28,8 +31,15 @@ pub fn execute() -> FnResult<Json<Value>> {
     let res = http::request::<()>(&req, None)?;
     
     // Parse the response as JSON
-    let body: Value = res.json()?;
+    let ip_info: Value = res.json()?;
     
-    // Return the IP information
-    Ok(Json(body))
+    // Create response with both args and IP info
+    // This way the args are printed/visible in the output
+    let result = serde_json::json!({
+        "received_args": input.0,
+        "ip_info": ip_info
+    });
+    
+    // Return the combined result
+    Ok(Json(result))
 }

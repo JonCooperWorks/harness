@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"os"
 
 	"github.com/99designs/keyring"
 )
@@ -18,11 +19,17 @@ type KeychainKeystore struct {
 }
 
 // NewKeychainKeystore creates a new macOS Keychain keystore
+// Uses HARNESS_KEYCHAIN environment variable if set, otherwise uses default login keychain
+// Set HARNESS_KEYCHAIN="harness-keys" to use custom keychain, or "" for default login keychain
 func NewKeychainKeystore() (Keystore, error) {
+	keychainName := os.Getenv("HARNESS_KEYCHAIN")
+	// If not set, default to empty (login keychain) to avoid double password prompts
+	// Set HARNESS_KEYCHAIN="harness-keys" to use the custom keychain
+	
 	ring, err := keyring.Open(keyring.Config{
 		ServiceName:              "harness",
-		KeychainName:             "harness-keys",
-		KeychainPasswordFunc:     nil, // Use default keychain
+		KeychainName:             keychainName, // Empty = default login keychain, "harness-keys" = custom keychain
+		KeychainPasswordFunc:     nil,         // Use default keychain
 		KeychainTrustApplication: true,
 	})
 	if err != nil {
