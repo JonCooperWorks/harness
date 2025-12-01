@@ -1,6 +1,6 @@
 # Harness - Dual-Authorization Exploit Execution System
 
-A cryptographically secure system for storing, transporting, approving, and executing sensitive payloads including zero-day exploits and high-risk penetration testing tools. Harness enforces **dual-authorization** through cryptographic signatures and encryption, ensuring that exploits cannot be executed without explicit approval from both the principal (firm leadership) and the client.
+A cryptographically secure system for storing, transporting, approving, and executing sensitive payloads including zero-day exploits and high-risk penetration testing tools. Harness enforces **dual-authorization** through cryptographic signatures and encryption, ensuring that exploits cannot be executed without explicit approval from both the principal (firm leadership) and the client (President).
 
 ## Purpose
 
@@ -16,16 +16,16 @@ Harness is designed for offensive security teams and penetration testers who nee
 
 Harness implements a two-party authorization system:
 
-1. **Principal Authorization**: Firm leadership (principal) cryptographically signs and encrypts the exploit payload using their private key. This signature proves the exploit has been reviewed and approved by authorized personnel.
+1. **Principal Authorization**: Firm leadership (principal) cryptographically signs and encrypts exploit payloads using their private key, creating a stockpile of approved exploits. These exploits are reusable and can be stored securely. The principal's signature proves the exploit has been reviewed and approved by authorized personnel.
 
-2. **Client Authorization**: The client must possess the harness private key (stored in OS keystore) to decrypt and execute the exploit. Without this key, execution is cryptographically impossible. Possession of the harness key represents explicit client approval.
+2. **Client Authorization**: The client (President) cryptographically signs the execution arguments (targeting information) using their private key. This signature proves the client has approved the specific targeting parameters for this execution. The client's signature on the args represents explicit approval for using the exploit against specific targets.
 
 3. **Execution**: The harness verifies both authorizations before execution:
-   - Verifies the principal's signature (proves principal approval)
-   - Requires the client's private key to decrypt (proves client approval)
-   - Only executes if both conditions are met
+   - Verifies the principal's signature on the exploit payload (proves principal approval of the exploit)
+   - Verifies the client's signature on the execution arguments (proves client approval of targeting)
+   - Only executes if both signatures are valid
 
-**Result**: A pentester cannot execute an exploit unless both the principal has signed it AND the client has provided their decryption key (representing approval).
+**Result**: A pentester cannot execute an exploit unless both the principal has signed the exploit payload AND the client has signed the execution arguments (targeting info). Both parties must cryptographically approve their respective components.
 
 ## Threat Model & Rationale
 
@@ -33,7 +33,7 @@ Harness implements a two-party authorization system:
 
 1. **Rogue Pentester Modification**: Prevents pentesters from modifying payloads after signing. The principal's signature covers the entire encrypted payload, making tampering detectable.
 
-2. **Unauthorized Execution**: Ensures exploits cannot be executed without client authorization. The client's private key (harness key) is required for decryption, and without it, execution is impossible.
+2. **Unauthorized Execution**: Ensures exploits cannot be executed without client authorization. The client must sign the execution arguments (targeting info), and without this signature, execution is impossible.
 
 3. **Exploit Confidentiality**: Protects exploit code from exposure during transit or storage. Payloads are encrypted with AES-256-GCM, and the symmetric key is encrypted using ECDH with the client's public key.
 
@@ -60,34 +60,38 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 │ (Firm Lead)  │
 └──────┬──────┘
        │
-       │ 1. Signs exploit with principal private key
+       │ 1. Signs exploit WASM with principal private key
        │ 2. Encrypts exploit with AES-256-GCM
-       │ 3. Encrypts symmetric key with client's public key (ECDH)
+       │ 3. Stores in exploit stockpile
        │
        ▼
 ┌─────────────────────────┐
-│  Encrypted Exploit File  │
-│  (signed + encrypted)    │
+│  Exploit Stockpile       │
+│  (signed + encrypted)   │
 └──────┬──────────────────┘
        │
-       │ Distributed to client
+       │ Exploit distributed to client
        │
        ▼
 ┌─────────────┐
 │   Client    │
+│ (President) │
 └──────┬──────┘
        │
-       │ 4. Provides harness private key (client approval)
+       │ 4. Reviews exploit
+       │ 5. Signs execution args (targeting info)
+       │    with client private key
        │
        ▼
 ┌─────────────┐
 │   Harness   │
 └──────┬──────┘
        │
-       │ 5. Verifies principal signature ✓
-       │ 6. Decrypts with client private key ✓
-       │ 7. Loads WASM payload
-       │ 8. Executes in sandbox
+       │ 6. Verifies principal signature on exploit ✓
+       │ 7. Verifies client signature on args ✓
+       │ 8. Decrypts exploit payload
+       │ 9. Loads WASM payload
+       │ 10. Executes with signed args in sandbox
        │
        ▼
 ┌─────────────┐
@@ -98,50 +102,64 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 
 ### Workflow Steps
 
-1. **Principal → Signs + Encrypts Exploit**
-   - Principal reviews and approves the exploit
+1. **Principal → Signs + Encrypts Exploit (Stockpile Creation)**
+   - Principal reviews and approves the exploit WASM payload
    - Signs the encrypted payload with principal's private key (ECDSA)
    - Encrypts exploit with AES-256-GCM
-   - Encrypts symmetric key with client's public key (ECDH)
+   - Stores in firm's exploit stockpile (reusable)
 
-2. **Client → Approves + Signs**
-   - Client reviews the exploit and approves execution
-   - Client provides harness private key (stored in OS keystore)
-   - This key represents cryptographic approval
+2. **Client → Signs Execution Arguments (Targeting Approval)**
+   - Client (President) reviews the exploit and approves execution
+   - Client creates execution arguments (targeting information: IPs, ports, etc.)
+   - Client signs the arguments with their private key (ECDSA)
+   - This signature proves client approval of the specific targeting parameters
 
 3. **Harness → Verifies Both → Decrypts → Executes**
-   - Verifies principal's signature (proves principal approval)
-   - Decrypts symmetric key using client's private key (proves client approval)
+   - Verifies principal's signature on the exploit payload (proves principal approval)
+   - Verifies client's signature on the execution arguments (proves client approval)
    - Decrypts exploit payload
    - Loads WASM module into sandbox
-   - Executes with provided arguments
+   - Executes with the signed arguments
+
+**Key Point**: The firm maintains a stockpile of signed exploits (reusable). The client signs the args (targeting info) to create a dual-authorized execution message. Both signatures are required - principal signs the exploit, client signs the targeting arguments.
 
 ## Dual Signatures Explained
 
-### Principal Signature
+### Principal Signature (Exploit Payload)
 
-- **Purpose**: Proves the exploit has been reviewed and approved by firm leadership
+- **Purpose**: Proves the exploit payload has been reviewed and approved by firm leadership
 - **Algorithm**: ECDSA with P-256 curve
 - **What it signs**: SHA-256 hash of `metadata || encrypted_symmetric_key || encrypted_plugin_data`
 - **Verification**: Harness verifies this signature before decryption
+- **Storage**: Signed exploits are stored in the firm's stockpile (reusable)
 - **If missing**: Execution fails immediately with "signature verification failed"
 
-### Client Authorization (Harness Key)
+### Client Signature (Execution Arguments)
 
-- **Purpose**: Proves the client has approved execution of the exploit
-- **Mechanism**: The symmetric key is encrypted with the client's public key (ECDH)
-- **Requirement**: Client must provide harness private key to decrypt
-- **Storage**: Private key stored in OS keystore (Keychain/Credential Manager/libsecret)
-- **If missing**: Decryption is cryptographically impossible, execution cannot proceed
+- **Purpose**: Proves the client (President) has approved the specific targeting parameters for execution
+- **Algorithm**: ECDSA with P-256 curve
+- **What it signs**: SHA-256 hash of the execution arguments JSON (targeting info: IPs, ports, etc.)
+- **Verification**: Harness verifies this signature before execution
+- **Storage**: Client's private key stored in OS keystore via the `Keystore` interface (Keychain/Credential Manager/libsecret)
+- **If missing**: Execution fails immediately - cannot proceed without client approval of targeting
 
 ### Execution Requirements
 
 Execution is **cryptographically impossible** without both:
 
-1. ✓ Valid principal signature (verified with principal's public key)
-2. ✓ Client's harness private key (required for decryption)
+1. ✓ Valid principal signature on exploit payload (verified with principal's public key)
+2. ✓ Valid client signature on execution arguments (verified with client's public key)
 
-Both conditions must be met. Missing either authorization results in immediate failure.
+Both signatures must be present and valid. Missing either authorization results in immediate failure.
+
+### Keystore Interface
+
+The keystore is implemented as a Go interface (`crypto/keystore/Keystore`) that provides platform-specific implementations:
+- **macOS**: Keychain Access
+- **Linux**: libsecret/keyring
+- **Windows**: Credential Manager
+
+This abstraction allows secure, platform-native key storage without exposing private keys to disk.
 
 ## Features
 
@@ -224,31 +242,44 @@ The client can verify the encrypted exploit without executing it:
 ```bash
 ./bin/verify \
   -file exploit.encrypted \
-  -keystore-key "client-harness-key" \
+  -keystore-key "client-key" \
   -president-key principal_public.pem
 ```
 
-### 5. Execute Exploit (Requires Both Authorizations)
+### 5. Client Signs Execution Arguments
+
+The client (President) signs the execution arguments (targeting info) before execution:
+
+```bash
+# Client creates and signs targeting arguments
+# (This step ensures client approval of specific targets)
+./bin/sign-args \
+  -args '{"target":"192.168.1.100","port":443}' \
+  -keystore-key "client-key" \
+  -output args.signed
+```
+
+### 6. Execute Exploit (Requires Both Authorizations)
 
 The harness verifies both authorizations and executes the exploit:
 
 ```bash
 ./bin/harness \
   -file exploit.encrypted \
-  -keystore-key "client-harness-key" \
   -president-key principal_public.pem \
-  -args '{"target":"192.168.1.100","port":443}'
+  -signed-args args.signed \
+  -client-key client_public.pem
 ```
 
 **Note**: Execution requires:
-- ✓ Valid principal signature (verified with `principal_public.pem`)
-- ✓ Client's harness private key (from keystore `client-harness-key`)
+- ✓ Valid principal signature on exploit (verified with `principal_public.pem`)
+- ✓ Valid client signature on args (verified with `client_public.pem`)
 
-Without both, execution fails cryptographically.
+Without both signatures, execution fails cryptographically.
 
 ## OS Keystore Integration
 
-**All private keys are stored in the OS keystore and never written to disk.** This provides secure key storage using platform-native security features.
+**All private keys are stored in the OS keystore and never written to disk.** The keystore is implemented as a Go interface (`crypto/keystore/Keystore`) that provides platform-specific implementations for secure key storage using platform-native security features.
 
 ### Key Management
 
@@ -324,16 +355,22 @@ All commands support keystore-based keys:
 
 ### Cryptographic Flow
 
-1. **Signing** (Principal):
+1. **Signing Exploit** (Principal):
    - Generate symmetric key (AES-256)
    - Encrypt exploit payload with symmetric key (AES-256-GCM)
-   - Encrypt symmetric key with client's public key (ECDH)
    - Sign metadata + encrypted data with principal's private key (ECDSA)
+   - Store in exploit stockpile (reusable)
 
-2. **Verification & Decryption** (Harness):
-   - Verify principal's signature with principal's public key
-   - Decrypt symmetric key with client's private key (ECDH)
-   - Decrypt exploit payload with symmetric key (AES-256-GCM)
+2. **Signing Arguments** (Client):
+   - Client creates execution arguments (targeting info: IPs, ports, etc.)
+   - Sign arguments JSON with client's private key (ECDSA)
+   - This signature proves client approval of targeting
+
+3. **Verification & Execution** (Harness):
+   - Verify principal's signature on exploit payload
+   - Verify client's signature on execution arguments
+   - Decrypt exploit data with symmetric key (AES-256-GCM)
+   - Load WASM module and execute with signed arguments
    - Load WASM module into sandbox
    - Execute with provided arguments
 
@@ -399,7 +436,7 @@ The symmetric key is encrypted using ECDH key exchange and AES-256-GCM:
 4. Encrypt symmetric key with AES-256-GCM using the derived key
 5. Prepend ephemeral public key and nonce to the ciphertext
 
-**Authorization**: Only the client with the harness private key can decrypt this symmetric key, representing client approval.
+**Note**: The current implementation encrypts the symmetric key with the client's public key. In the full dual-authorization model, the client signs the execution arguments separately to approve targeting.
 
 #### Encrypted Exploit Data Format
 
@@ -593,8 +630,3 @@ The dual-authorization model provides liability protections by:
 - Encryption ensures exploit confidentiality
 - Client authorization is enforced cryptographically (harness key required)
 - WASM sandboxing prevents exploits from affecting the host system
-- File-based private keys (`-key` flag) are deprecated and only supported for migration purposes
-
-## License
-
-[Your License Here]
