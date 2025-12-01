@@ -13,9 +13,10 @@ import (
 
 func main() {
 	var (
-		encryptedFile       = flag.String("file", "", "Path to encrypted plugin file")
-		keystoreKeyID       = flag.String("keystore-key", "", "Key ID in OS keystore (required)")
-		presidentPubKeyFile = flag.String("president-key", "", "Path to president's public key file")
+		encryptedFile     = flag.String("file", "", "Path to approved plugin file (with client signature)")
+		keystoreKeyID     = flag.String("keystore-key", "", "Key ID in OS keystore for pentester's private key (required)")
+		clientPubKeyFile  = flag.String("client-key", "", "Path to client's public key file (required)")
+		argsJSON          = flag.String("args", "", "JSON arguments (must match signed arguments)")
 	)
 	flag.Parse()
 
@@ -25,44 +26,49 @@ func main() {
 	}
 
 	if *keystoreKeyID == "" {
-		fmt.Fprintf(os.Stderr, "Error: -keystore-key is required (private keys must be stored in OS keystore)\n")
+		fmt.Fprintf(os.Stderr, "Error: -keystore-key is required (pentester's private key must be stored in OS keystore)\n")
 		os.Exit(1)
 	}
 
-	if *presidentPubKeyFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -president-key is required\n")
+	if *clientPubKeyFile == "" {
+		fmt.Fprintf(os.Stderr, "Error: -client-key is required (client's public key for verifying argument signature)\n")
 		os.Exit(1)
 	}
 
-	// Load president's public key
-	presidentPubKey, err := loadPublicKey(*presidentPubKeyFile)
+	if *argsJSON == "" {
+		fmt.Fprintf(os.Stderr, "Error: -args is required (must match the arguments signed by client)\n")
+		os.Exit(1)
+	}
+
+	// Load client's public key
+	clientPubKey, err := loadPublicKey(*clientPubKeyFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading president's public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error loading client's public key: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Create PresidentialOrder from keystore
-	po, err := crypto.NewPresidentialOrderFromKeystore(*keystoreKeyID, presidentPubKey)
+	// Create PresidentialOrder from keystore (pentester's private key + client's public key)
+	po, err := crypto.NewPresidentialOrderFromKeystore(*keystoreKeyID, clientPubKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating PresidentialOrder from keystore: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Load encrypted file
-	encryptedData, err := os.ReadFile(*encryptedFile)
+	// Load approved file (contains encrypted payload + client signature + args)
+	fileData, err := os.ReadFile(*encryptedFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading encrypted file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error reading approved file: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Verify and decrypt
-	payload, err := po.VerifyAndDecrypt(encryptedData)
+	// Verify client signature on arguments and decrypt
+	payload, err := po.VerifyAndDecrypt(fileData, []byte(*argsJSON))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error verifying and decrypting: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("✓ Signature verified successfully\n")
+	fmt.Printf("✓ Client signature on arguments verified successfully\n")
 	fmt.Printf("✓ Plugin decrypted successfully\n")
 	fmt.Printf("\nPlugin details:\n")
 	fmt.Printf("  Type: %v\n", payload.Type)

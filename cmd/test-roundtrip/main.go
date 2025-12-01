@@ -130,7 +130,8 @@ func main() {
 	}
 
 	// Decrypt and verify
-	decryptedPayload, err := po.VerifyAndDecrypt(encryptedData)
+	// For test-roundtrip, we need to provide args - use empty args for testing
+	decryptedPayload, err := po.VerifyAndDecrypt(encryptedData, []byte("{}"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error verifying and decrypting: %v\n", err)
 		os.Exit(1)

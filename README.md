@@ -14,19 +14,22 @@ Harness is designed for offensive security teams and penetration testers who nee
 
 ### Dual-Authorization Model
 
-Harness implements a two-party authorization system:
+Harness implements a two-party authorization system where **nobody can run an exploit unilaterally**:
 
-1. **Principal Authorization**: Firm leadership (principal) encrypts exploit payloads with the pentester's public key and signs the encrypted payload. This ensures the pentester can decrypt and execute, but the exploit remains confidential until execution. The principal's signature proves the exploit has been reviewed and approved by authorized personnel.
+1. **Principal Authorization**: Firm leadership (principal) encrypts exploit payloads with the pentester's public key. The principal has the exploit but **cannot authorize its use** - they only encrypt it. The exploit remains confidential until execution.
 
-2. **Client Authorization**: The client (President) receives the encrypted payload along with execution arguments (targeting information). The client cryptographically signs the arguments, proving approval of the specific targeting parameters. This signature is attached to the payload before it's returned to the pentester.
+2. **Client Authorization**: The client (President) receives the encrypted payload along with execution arguments (targeting information). The client cryptographically signs the arguments, proving approval of the specific targeting parameters. The client has **authorization power but not the exploit** - they can approve usage but cannot decrypt or execute.
 
 3. **Execution**: The pentester receives the encrypted payload with client-signed arguments and executes:
-   - Verifies the principal's signature on the exploit payload (proves principal approval)
    - Verifies the client's signature on the execution arguments (proves client approval of targeting)
-   - Decrypts the exploit using their private key (pentester can decrypt but doesn't inspect the exploit)
-   - Executes in WASM sandbox without knowledge of exploit details
+   - Decrypts the exploit using their private key (pentester can decrypt because principal encrypted it for them)
+   - Executes in WASM sandbox without prior knowledge of exploit details
 
-**Result**: A pentester cannot execute an exploit unless both the principal has signed the exploit payload AND the client has signed the execution arguments. The pentester executes the exploit without prior knowledge of its contents, as it remains encrypted until loaded into the sandbox.
+**Result**: A pentester cannot execute an exploit unless:
+- ✓ The principal encrypted it with the pentester's public key (principal authorization - they have the exploit)
+- ✓ The client signed the execution arguments (client authorization - they approve usage)
+
+Both parties must act: principal encrypts (has exploit, no authorization), client signs args (has authorization, no exploit), pentester executes (can decrypt, needs both).
 
 ## Threat Model & Rationale
 
@@ -62,13 +65,13 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 └──────┬──────┘
        │
        │ 1. Encrypts exploit with pentester's public key
-       │ 2. Signs encrypted payload with principal private key
-       │ 3. Creates execution arguments (targeting info)
+       │ 2. Creates execution arguments (targeting info)
+       │    (Principal has exploit but cannot authorize)
        │
        ▼
 ┌─────────────────────────┐
 │  Encrypted Payload + Args │
-│  (signed by principal)   │
+│  (no signature - unsigned) │
 └──────┬──────────────────┘
        │
        │ Sent to client for approval
@@ -79,20 +82,20 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 │ (President) │
 └──────┬──────┘
        │
-       │ 4. Reviews encrypted payload and arguments
-       │ 5. Signs arguments with client private key
-       │ 6. Returns signed payload to pentester
+       │ 3. Reviews encrypted payload and arguments
+       │ 4. Signs arguments with client private key
+       │    (Client has authorization but not exploit)
+       │ 5. Returns approved payload to pentester
        │
        ▼
 ┌─────────────┐
 │  Pentester  │
 └──────┬──────┘
        │
-       │ 7. Verifies principal signature on payload ✓
-       │ 8. Verifies client signature on arguments ✓
-       │ 9. Decrypts exploit with pentester private key
-       │ 10. Loads WASM payload (never sees plaintext)
-       │ 11. Executes in sandbox with signed args
+       │ 6. Verifies client signature on arguments ✓
+       │ 7. Decrypts exploit with pentester private key ✓
+       │ 8. Loads WASM payload (never sees plaintext)
+       │ 9. Executes in sandbox with signed args
        │
        ▼
 ┌─────────────┐
@@ -103,38 +106,38 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 
 ### Workflow Steps
 
-1. **Principal → Encrypts + Signs Exploit**
-   - Principal reviews and approves the exploit WASM payload
+1. **Principal → Encrypts Exploit**
+   - Principal reviews and encrypts the exploit WASM payload
    - Encrypts exploit with pentester's public key (ECDH + AES-256-GCM)
-   - Signs the encrypted payload with principal's private key (ECDSA)
    - Creates execution arguments (targeting information: IPs, ports, etc.)
+   - **Principal does NOT sign** - they have the exploit but cannot authorize its use
    - Sends encrypted payload + arguments to client
 
 2. **Client → Signs Arguments**
    - Client (President) reviews the encrypted payload and execution arguments
    - Client signs the execution arguments with their private key (ECDSA)
    - This signature proves client approval of the specific targeting parameters
-   - Client returns the signed payload to the pentester
+   - **Client cannot decrypt** - they have authorization power but not the exploit
+   - Client returns the approved payload (with signed arguments) to the pentester
 
-3. **Pentester → Verifies Both → Decrypts → Executes**
-   - Verifies principal's signature on the exploit payload (proves principal approval)
+3. **Pentester → Verifies Client Signature → Decrypts → Executes**
    - Verifies client's signature on the execution arguments (proves client approval)
-   - Decrypts exploit using pentester's private key
+   - Decrypts exploit using pentester's private key (principal authorized them via encryption)
    - Loads WASM module directly into sandbox (pentester never sees plaintext exploit)
    - Executes with client-signed arguments
 
-**Key Point**: The pentester executes the exploit without prior knowledge of its contents. The exploit remains encrypted until loaded into the WASM sandbox. Both signatures are required - principal signs the exploit, client signs the targeting arguments.
+**Key Point**: Nobody can run an exploit unilaterally. Principal encrypts (has exploit, no authorization), client signs args (has authorization, no exploit), pentester executes (can decrypt, needs both authorizations).
 
-## Dual Signatures Explained
+## Authorization Model Explained
 
-### Principal Signature (Exploit Payload)
+### Principal Encryption (Exploit Payload)
 
-- **Purpose**: Proves the exploit payload has been reviewed and approved by firm leadership
-- **Algorithm**: ECDSA with P-256 curve
-- **What it signs**: SHA-256 hash of `metadata || encrypted_symmetric_key || encrypted_plugin_data`
-- **Verification**: Harness verifies this signature before decryption
-- **Storage**: Signed exploits are stored in the firm's stockpile (reusable)
-- **If missing**: Execution fails immediately with "signature verification failed"
+- **Purpose**: Principal encrypts the exploit with the pentester's public key, authorizing the pentester to decrypt
+- **Algorithm**: ECDH key exchange + AES-256-GCM encryption
+- **What it encrypts**: The exploit WASM payload (symmetric key encrypted with pentester's public key)
+- **Authorization**: By encrypting with pentester's public key, principal authorizes the pentester to decrypt
+- **Storage**: Encrypted exploits are stored in the firm's stockpile (reusable, unsigned)
+- **If missing**: Pentester cannot decrypt - execution fails cryptographically
 
 ### Client Signature (Execution Arguments)
 
@@ -149,10 +152,10 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 
 Execution is **cryptographically impossible** without both:
 
-1. ✓ Valid principal signature on exploit payload (verified with principal's public key)
-2. ✓ Valid client signature on execution arguments (verified with client's public key)
+1. ✓ Exploit encrypted with pentester's public key (principal authorization - they have the exploit)
+2. ✓ Valid client signature on execution arguments (client authorization - they approve usage)
 
-Both signatures must be present and valid. Missing either authorization results in immediate failure.
+Both authorizations must be present. Missing either results in immediate failure. **Nobody can run an exploit unilaterally** - principal has exploit but no authorization, client has authorization but no exploit, pentester can decrypt but needs both.
 
 ### Keystore Interface
 
@@ -379,21 +382,16 @@ All commands support keystore-based keys:
    - Encrypt symmetric key with pentester's public key (ECDH)
    - Create metadata and write encrypted file (without signature)
    - Store in exploit stockpile (reusable, unsigned)
+   - **Principal does NOT sign** - they have the exploit but cannot authorize its use
 
-2. **Signing Exploit** (Principal, Sign command):
-   - Read encrypted file from stockpile
-   - Sign metadata + encrypted data with principal's private key (ECDSA)
-   - Prepend signature to encrypted file
-   - Creates signed exploit ready for distribution to client
-
-3. **Signing Arguments** (Client, Sign-Args command):
+2. **Signing Arguments** (Client, Sign command):
    - Client receives encrypted payload and execution arguments
    - Client signs the execution arguments with client's private key (ECDSA)
-   - Attach client signature to payload
-   - Return signed payload to pentester
+   - Append client signature and arguments to encrypted file
+   - Return approved payload to pentester
+   - **Client cannot decrypt** - they have authorization power but not the exploit
 
-4. **Verification & Execution** (Pentester, Harness):
-   - Verify principal's signature on exploit payload
+3. **Verification & Execution** (Pentester, Harness):
    - Verify client's signature on execution arguments
    - Decrypt symmetric key with pentester's private key (ECDH)
    - Decrypt exploit data with symmetric key (AES-256-GCM)
@@ -402,10 +400,10 @@ All commands support keystore-based keys:
 
 ### Encrypted File Format Specification
 
-The encrypted exploit file is a binary format with the following structure:
+The encrypted exploit file format (after client signing) is:
 
 ```
-[signature_length:4 bytes][signature][metadata_length:4 bytes][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+[metadata_length:4 bytes][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4 bytes][client_sig][args_len:4 bytes][args_json]
 ```
 
 #### File Layout

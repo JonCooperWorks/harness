@@ -22,7 +22,7 @@ func main() {
 		pluginFile        = flag.String("plugin", "", "Path to plugin file to encrypt")
 		pluginType        = flag.String("type", "wasm", "Plugin type: wasm")
 		pluginName        = flag.String("name", "test-plugin", "Plugin name")
-		harnessPubKeyPath = flag.String("harness-key", "", "Path to harness's public key (for encryption)")
+		harnessPubKeyPath = flag.String("harness-key", "", "Path to pentester's public key (for encryption - this is the harness key)")
 		outputPath        = flag.String("output", "plugin.encrypted", "Path to save encrypted plugin")
 	)
 	flag.Parse()
@@ -37,10 +37,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load harness's public key (for encryption)
+	// Load pentester's public key (for encryption - this is the harness key)
+	// The exploit is encrypted with the pentester's public key so they can decrypt and execute
 	harnessPubKey, err := loadPublicKey(*harnessPubKeyPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading harness's public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error loading pentester's public key: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -251,4 +252,3 @@ func encryptAES(plaintext, key []byte) ([]byte, error) {
 
 	return result, nil
 }
-

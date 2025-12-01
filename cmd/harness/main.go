@@ -16,10 +16,10 @@ import (
 
 func main() {
 	var (
-		encryptedFile       = flag.String("file", "", "Path to encrypted plugin file")
-		keystoreKeyID       = flag.String("keystore-key", "", "Key ID in OS keystore (required)")
-		presidentPubKeyFile = flag.String("president-key", "", "Path to president's public key file")
-		argsJSON            = flag.String("args", "{}", "JSON arguments to pass to the plugin")
+		encryptedFile     = flag.String("file", "", "Path to approved plugin file (with signature)")
+		keystoreKeyID     = flag.String("keystore-key", "", "Key ID in OS keystore for private key (required)")
+		signaturePubKeyFile = flag.String("signature-key", "", "Path to public key file for verifying signature (required)")
+		argsJSON          = flag.String("args", "", "JSON arguments (must match signed arguments)")
 	)
 	flag.Parse()
 
@@ -29,38 +29,43 @@ func main() {
 	}
 
 	if *keystoreKeyID == "" {
-		fmt.Fprintf(os.Stderr, "Error: -keystore-key is required (private keys must be stored in OS keystore)\n")
+		fmt.Fprintf(os.Stderr, "Error: -keystore-key is required (private key must be stored in OS keystore)\n")
 		os.Exit(1)
 	}
 
-	if *presidentPubKeyFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -president-key is required\n")
+	if *signaturePubKeyFile == "" {
+		fmt.Fprintf(os.Stderr, "Error: -signature-key is required (public key for verifying signature)\n")
 		os.Exit(1)
 	}
 
-	// Load president's public key
-	presidentPubKey, err := loadPublicKey(*presidentPubKeyFile)
+	if *argsJSON == "" {
+		fmt.Fprintf(os.Stderr, "Error: -args is required (must match the signed arguments)\n")
+		os.Exit(1)
+	}
+
+	// Load public key for signature verification
+	signaturePubKey, err := loadPublicKey(*signaturePubKeyFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading president's public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error loading signature public key: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Create PresidentialOrder from keystore
-	po, err := crypto.NewPresidentialOrderFromKeystore(*keystoreKeyID, presidentPubKey)
+	po, err := crypto.NewPresidentialOrderFromKeystore(*keystoreKeyID, signaturePubKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating PresidentialOrder from keystore: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Load encrypted file
-	encryptedData, err := os.ReadFile(*encryptedFile)
+	// Load approved file (contains encrypted payload + client signature + args)
+	fileData, err := os.ReadFile(*encryptedFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading encrypted file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error reading approved file: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Verify and decrypt
-	payload, err := po.VerifyAndDecrypt(encryptedData)
+	// Verify client signature on arguments and decrypt
+	payload, err := po.VerifyAndDecrypt(fileData, []byte(*argsJSON))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error verifying and decrypting: %v\n", err)
 		os.Exit(1)

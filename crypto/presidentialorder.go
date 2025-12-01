@@ -20,38 +20,38 @@ import (
 
 // PresidentialOrder interface for verifying signatures and decrypting payloads
 type PresidentialOrder interface {
-	VerifyAndDecrypt(ciphertextAndMetadata []byte) (*Payload, error)
+	VerifyAndDecrypt(ciphertextAndMetadata []byte, argsJSON []byte) (*Payload, error)
 }
 
 // PresidentialOrderImpl implements the PresidentialOrder interface
 type PresidentialOrderImpl struct {
-	privateKey        *ecdsa.PrivateKey
-	presidentPubKey   *ecdsa.PublicKey
-	keystore          keystore.Keystore
-	keystoreKeyID     string
+	privateKey      *ecdsa.PrivateKey // Pentester's private key (for decryption)
+	clientPubKey    *ecdsa.PublicKey  // Client's public key (for verifying argument signature)
+	keystore        keystore.Keystore
+	keystoreKeyID   string
 }
 
 // NewPresidentialOrderFromKeys creates a new PresidentialOrder from provided keys
-func NewPresidentialOrderFromKeys(privateKey *ecdsa.PrivateKey, presidentPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
+func NewPresidentialOrderFromKeys(privateKey *ecdsa.PrivateKey, clientPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
 	if privateKey == nil {
 		return nil, errors.New("private key cannot be nil")
 	}
-	if presidentPubKey == nil {
-		return nil, errors.New("president public key cannot be nil")
+	if clientPubKey == nil {
+		return nil, errors.New("client public key cannot be nil")
 	}
 	return &PresidentialOrderImpl{
-		privateKey:      privateKey,
-		presidentPubKey: presidentPubKey,
+		privateKey:   privateKey,
+		clientPubKey: clientPubKey,
 	}, nil
 }
 
 // NewPresidentialOrderFromKeystore creates a new PresidentialOrder loading the private key from OS keystore
-func NewPresidentialOrderFromKeystore(keystoreKeyID string, presidentPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
+func NewPresidentialOrderFromKeystore(keystoreKeyID string, clientPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
 	if keystoreKeyID == "" {
 		return nil, errors.New("keystore key ID cannot be empty")
 	}
-	if presidentPubKey == nil {
-		return nil, errors.New("president public key cannot be nil")
+	if clientPubKey == nil {
+		return nil, errors.New("client public key cannot be nil")
 	}
 
 	ks, err := keystore.NewKeystore()
@@ -65,20 +65,21 @@ func NewPresidentialOrderFromKeystore(keystoreKeyID string, presidentPubKey *ecd
 	}
 
 	return &PresidentialOrderImpl{
-		privateKey:      privateKey,
-		presidentPubKey: presidentPubKey,
-		keystore:        ks,
-		keystoreKeyID:   keystoreKeyID,
+		privateKey:    privateKey,
+		clientPubKey:  clientPubKey,
+		keystore:      ks,
+		keystoreKeyID: keystoreKeyID,
 	}, nil
 }
 
 // NewPresidentialOrderFromFile creates a new PresidentialOrder loading the private key from a file
-func NewPresidentialOrderFromFile(privateKeyPath string, presidentPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
+// DEPRECATED: Use NewPresidentialOrderFromKeystore instead (private keys should only be in keystore)
+func NewPresidentialOrderFromFile(privateKeyPath string, clientPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
 	if privateKeyPath == "" {
 		return nil, errors.New("private key path cannot be empty")
 	}
-	if presidentPubKey == nil {
-		return nil, errors.New("president public key cannot be nil")
+	if clientPubKey == nil {
+		return nil, errors.New("client public key cannot be nil")
 	}
 
 	keyData, err := os.ReadFile(privateKeyPath)
@@ -92,64 +93,123 @@ func NewPresidentialOrderFromFile(privateKeyPath string, presidentPubKey *ecdsa.
 	}
 
 	return &PresidentialOrderImpl{
-		privateKey:      privateKey,
-		presidentPubKey: presidentPubKey,
+		privateKey:   privateKey,
+		clientPubKey: clientPubKey,
 	}, nil
 }
 
-// VerifyAndDecrypt verifies the signature and decrypts the payload
-func (po *PresidentialOrderImpl) VerifyAndDecrypt(ciphertextAndMetadata []byte) (*Payload, error) {
-	// Parse the encrypted payload structure:
-	// [signature_length:4][signature][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
-	
-	if len(ciphertextAndMetadata) < 8 {
-		return nil, errors.New("ciphertext too short")
+// VerifyAndDecrypt verifies the client signature on arguments and decrypts the payload
+// File format: [encrypted_payload][client_sig_len:4][client_sig][args_len:4][args_json]
+// Encrypted payload format: [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []byte) (*Payload, error) {
+	if len(fileData) < 12 {
+		return nil, errors.New("file too short")
 	}
 
-	offset := 0
+	// Parse from the end: read client signature and args
+	// File format: [encrypted_payload][client_sig_len:4][client_sig][args_len:4][args_json]
+	argsJSONBytes := []byte(argsJSON)
+	argsLen := len(argsJSONBytes)
 	
-	// Read signature length
-	sigLen := int(binary.BigEndian.Uint32(ciphertextAndMetadata[offset:offset+4]))
-	offset += 4
-	
-	if len(ciphertextAndMetadata) < offset+sigLen {
-		return nil, errors.New("invalid signature length")
+	// Find args in the file (should be at the end)
+	if len(fileData) < argsLen+4 {
+		return nil, errors.New("file too short")
 	}
 	
-	// Read signature
-	signature := ciphertextAndMetadata[offset:offset+sigLen]
-	offset += sigLen
+	// Args start position (args_json starts here)
+	argsStart := len(fileData) - argsLen
 	
-	// Read metadata length
-	metadataLen := int(binary.BigEndian.Uint32(ciphertextAndMetadata[offset:offset+4]))
-	offset += 4
-	
-	if len(ciphertextAndMetadata) < offset+metadataLen {
-		return nil, errors.New("invalid metadata length")
+	// Verify args match
+	fileArgsJSON := fileData[argsStart : argsStart+argsLen]
+	if string(fileArgsJSON) != string(argsJSONBytes) {
+		return nil, fmt.Errorf("provided args do not match file args: file has %q, provided %q", string(fileArgsJSON), string(argsJSONBytes))
 	}
 	
-	// Read metadata
-	metadata := ciphertextAndMetadata[offset:offset+metadataLen]
-	offset += metadataLen
+	// Read args_len (4 bytes before args_json)
+	argsLenPos := argsStart - 4
+	if argsLenPos < 0 {
+		return nil, errors.New("file too short for args_len")
+	}
+	argsLenFromFile := int(binary.BigEndian.Uint32(fileData[argsLenPos : argsLenPos+4]))
+	if argsLenFromFile != argsLen {
+		return nil, fmt.Errorf("args length mismatch: file has %d bytes, provided %d bytes", argsLenFromFile, argsLen)
+	}
 	
-	// Remaining data is encrypted symmetric key + encrypted plugin data
-	encryptedData := ciphertextAndMetadata[offset:]
+	// Now we need to find the signature. The signature is before args_len.
+	// We know the structure is: [payload][sig_len:4][sig][args_len:4][args]
+	// So sig ends at argsLenPos, and sig_len is 4 bytes before sig starts.
+	// But we don't know sig length yet. Let's try reading backwards to find a reasonable sig_len value.
+	// ECDSA P-256 signatures are typically 70-72 bytes in ASN.1 DER format.
 	
-	// Verify signature over metadata + encrypted data
-	hash := sha256.Sum256(append(metadata, encryptedData...))
+	// Try to find sig_len by looking for reasonable values (60-80 bytes)
+	// Start from argsLenPos and work backwards
+	foundSigLen := false
+	var clientSigLen int
+	var sigLenPos int
+	for offset := 4; offset < argsLenPos && offset < 200; offset += 1 {
+		pos := argsLenPos - offset - 4
+		if pos < 0 {
+			break
+		}
+		sigLenCandidate := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
+		if sigLenCandidate >= 60 && sigLenCandidate <= 80 {
+			// Check if sig + sig_len + args_len + args would match
+			sigStart := pos + 4
+			sigEnd := sigStart + sigLenCandidate
+			if sigEnd == argsLenPos {
+				clientSigLen = sigLenCandidate
+				sigLenPos = pos
+				foundSigLen = true
+				break
+			}
+		}
+	}
 	
+	if !foundSigLen {
+		return nil, errors.New("could not find valid signature length")
+	}
+	
+	// Read client signature
+	sigPos := sigLenPos + 4
+	if sigPos+clientSigLen != argsLenPos {
+		return nil, fmt.Errorf("signature position mismatch: expected sig to end at %d, but args_len starts at %d", sigPos+clientSigLen, argsLenPos)
+	}
+	clientSignature := fileData[sigPos : sigPos+clientSigLen]
+	offset := sigLenPos
+
+	// Verify client signature on arguments
+	argsHash := sha256.Sum256(argsJSON)
 	var sig struct {
 		R, S *big.Int
 	}
-	_, err := asn1.Unmarshal(signature, &sig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal signature: %w", err)
+	if _, err := asn1.Unmarshal(clientSignature, &sig); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal client signature: %w", err)
 	}
-	
-	if !ecdsa.Verify(po.presidentPubKey, hash[:], sig.R, sig.S) {
-		return nil, errors.New("signature verification failed")
+	if !ecdsa.Verify(po.clientPubKey, argsHash[:], sig.R, sig.S) {
+		return nil, errors.New("client signature verification failed")
 	}
-	
+
+	// Now parse encrypted payload (everything before client signature)
+	encryptedPayload := fileData[:offset]
+	if len(encryptedPayload) < 4 {
+		return nil, errors.New("encrypted payload too short")
+	}
+
+	// Parse encrypted payload: [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	payloadOffset := 0
+
+	// Read metadata length
+	metadataLen := int(binary.BigEndian.Uint32(encryptedPayload[payloadOffset : payloadOffset+4]))
+	payloadOffset += 4
+
+	if len(encryptedPayload) < payloadOffset+metadataLen {
+		return nil, errors.New("invalid metadata length")
+	}
+
+	// Read metadata
+	metadata := encryptedPayload[payloadOffset : payloadOffset+metadataLen]
+	payloadOffset += metadataLen
+
 	// Parse metadata to get encrypted symmetric key length
 	var metadataStruct struct {
 		SymmetricKeyLen int    `json:"symmetric_key_len"`
@@ -159,33 +219,35 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(ciphertextAndMetadata []byte) 
 	if err := json.Unmarshal(metadata, &metadataStruct); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
-	
+
+	// Remaining data is encrypted symmetric key + encrypted plugin data
+	encryptedData := encryptedPayload[payloadOffset:]
 	if len(encryptedData) < metadataStruct.SymmetricKeyLen+metadataStruct.PluginDataLen {
 		return nil, errors.New("encrypted data too short")
 	}
-	
+
 	// Extract encrypted symmetric key
 	encryptedSymmetricKey := encryptedData[:metadataStruct.SymmetricKeyLen]
 	encryptedPluginData := encryptedData[metadataStruct.SymmetricKeyLen : metadataStruct.SymmetricKeyLen+metadataStruct.PluginDataLen]
-	
-	// Decrypt symmetric key using ECDSA key exchange
+
+	// Decrypt symmetric key using pentester's private key (ECDH)
 	symmetricKey, err := po.decryptSymmetricKey(encryptedSymmetricKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
 	}
-	
+
 	// Decrypt plugin data using AES
 	pluginData, err := decryptAES(encryptedPluginData, symmetricKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt plugin data: %w", err)
 	}
-	
+
 	// Deserialize Payload
 	var payload Payload
 	if err := json.Unmarshal(pluginData, &payload); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal payload: %w", err)
 	}
-	
+
 	return &payload, nil
 }
 

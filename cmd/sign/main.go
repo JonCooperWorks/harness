@@ -17,98 +17,64 @@ import (
 
 func main() {
 	var (
-		encryptedFile  = flag.String("file", "", "Path to encrypted plugin file (from encrypt command)")
-		presidentKeyID = flag.String("president-keystore-key", "", "Key ID in OS keystore for president's private key (required)")
-		outputPath     = flag.String("output", "", "Path to save signed plugin (defaults to input file with .signed suffix)")
+		encryptedFile = flag.String("file", "", "Path to encrypted plugin file (from encrypt command)")
+		clientKeyID   = flag.String("client-keystore-key", "", "Key ID in OS keystore for client's private key (required)")
+		argsJSON      = flag.String("args", "", "JSON arguments to sign (required)")
+		outputPath    = flag.String("output", "", "Path to save approved plugin (defaults to input file with .approved suffix)")
 	)
 	flag.Parse()
 
 	if *encryptedFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -file is required (use ./bin/encrypt first to create encrypted file)\n")
+		fmt.Fprintf(os.Stderr, "Error: -file is required\n")
 		os.Exit(1)
 	}
 
-	if *presidentKeyID == "" {
-		fmt.Fprintf(os.Stderr, "Error: -president-keystore-key is required (private keys must be stored in OS keystore)\n")
+	if *clientKeyID == "" {
+		fmt.Fprintf(os.Stderr, "Error: -client-keystore-key is required (private keys must be stored in OS keystore)\n")
+		os.Exit(1)
+	}
+
+	if *argsJSON == "" {
+		fmt.Fprintf(os.Stderr, "Error: -args is required (client must sign execution arguments)\n")
 		os.Exit(1)
 	}
 
 	if *outputPath == "" {
-		*outputPath = *encryptedFile + ".signed"
+		*outputPath = *encryptedFile + ".approved"
 	}
 
-	// Load president's private key from keystore
+	// Load client's private key from keystore
 	ks, err := keystore.NewKeystore()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
 		os.Exit(1)
 	}
-	presidentKey, err := ks.GetPrivateKey(*presidentKeyID)
+	clientKey, err := ks.GetPrivateKey(*clientKeyID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading president's private key from keystore: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error loading client's private key from keystore: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Load encrypted file
+	// Validate args JSON
+	var args json.RawMessage
+	if err := json.Unmarshal([]byte(*argsJSON), &args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid JSON in -args: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Load encrypted file (format: [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data])
 	encryptedData, err := os.ReadFile(*encryptedFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading encrypted file: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Parse encrypted file structure (without signature):
-	// [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
-	if len(encryptedData) < 4 {
-		fmt.Fprintf(os.Stderr, "Error: encrypted file too short\n")
-		os.Exit(1)
-	}
-
-	offset := 0
-
-	// Read metadata length
-	metadataLen := int(binary.BigEndian.Uint32(encryptedData[offset : offset+4]))
-	offset += 4
-
-	if len(encryptedData) < offset+metadataLen {
-		fmt.Fprintf(os.Stderr, "Error: invalid metadata length\n")
-		os.Exit(1)
-	}
-
-	// Read metadata
-	metadataJSON := encryptedData[offset : offset+metadataLen]
-	offset += metadataLen
-
-	// Parse metadata to get lengths
-	var metadataStruct struct {
-		SymmetricKeyLen int    `json:"symmetric_key_len"`
-		PluginDataLen   int    `json:"plugin_data_len"`
-		Algorithm       string `json:"algorithm"`
-	}
-	if err := json.Unmarshal(metadataJSON, &metadataStruct); err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing metadata: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Verify we have enough data
-	if len(encryptedData) < offset+metadataStruct.SymmetricKeyLen+metadataStruct.PluginDataLen {
-		fmt.Fprintf(os.Stderr, "Error: encrypted file incomplete\n")
-		os.Exit(1)
-	}
-
-	// Extract encrypted symmetric key and plugin data
-	encryptedSymmetricKey := encryptedData[offset : offset+metadataStruct.SymmetricKeyLen]
-	offset += metadataStruct.SymmetricKeyLen
-	encryptedPluginData := encryptedData[offset : offset+metadataStruct.PluginDataLen]
-
-	// Create data to sign: metadata + encrypted data
-	dataToSign := append(metadataJSON, encryptedSymmetricKey...)
-	dataToSign = append(dataToSign, encryptedPluginData...)
-
-	// Sign the data with president's private key
-	hash := sha256.Sum256(dataToSign)
-	r, s, err := ecdsa.Sign(rand.Reader, presidentKey, hash[:])
+	// Sign the arguments with client's private key
+	argsBytes := []byte(*argsJSON)
+	hash := sha256.Sum256(argsBytes)
+	r, s, err := ecdsa.Sign(rand.Reader, clientKey, hash[:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error signing data: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error signing arguments: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -121,39 +87,37 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Build final encrypted file structure:
-	// [signature_length:4][signature][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	// Build final approved file structure:
+	// [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][args_len:4][args_json]
 	var output []byte
 
-	// Write signature length
+	// Write encrypted payload (already in correct format)
+	output = append(output, encryptedData...)
+
+	// Write client signature length
 	sigLenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(sigLenBuf, uint32(len(signature)))
 	output = append(output, sigLenBuf...)
 
-	// Write signature
+	// Write client signature
 	output = append(output, signature...)
 
-	// Write metadata length
-	metadataLenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(metadataLenBuf, uint32(len(metadataJSON)))
-	output = append(output, metadataLenBuf...)
+	// Write args length
+	argsLenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(argsLenBuf, uint32(len(argsBytes)))
+	output = append(output, argsLenBuf...)
 
-	// Write metadata
-	output = append(output, metadataJSON...)
-
-	// Write encrypted symmetric key
-	output = append(output, encryptedSymmetricKey...)
-
-	// Write encrypted plugin data
-	output = append(output, encryptedPluginData...)
+	// Write args JSON
+	output = append(output, argsBytes...)
 
 	// Write to file
 	if err := os.WriteFile(*outputPath, output, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing encrypted file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error writing approved file: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Plugin signed successfully:\n")
+	fmt.Printf("Arguments signed successfully:\n")
 	fmt.Printf("  Input: %s\n", *encryptedFile)
 	fmt.Printf("  Output: %s\n", *outputPath)
+	fmt.Printf("  Arguments: %s\n", *argsJSON)
 }
