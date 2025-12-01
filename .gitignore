@@ -48,3 +48,5 @@ test-plugin.txt
 *.log
 
 *.pem
+*.approved
+*.signed
