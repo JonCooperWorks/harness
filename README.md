@@ -6,7 +6,7 @@ A cross-platform Go program that securely loads and executes encrypted WASM plug
 
 - **Cryptographic Security**: ECDSA signature verification and AES-256 encryption
 - **Cross-Platform**: Works on macOS, Linux, and Windows
-- **WASM Plugins**: Supports WebAssembly plugins via wazero runtime
+- **WASM Plugins**: Supports WebAssembly plugins via Extism SDK
 - **OS Keystore Integration**: Secure key storage using platform keystores
 - **Memory-Based Loading**: Plugins loaded directly from memory
 
@@ -51,13 +51,14 @@ Generate keys for the president (who signs plugins) and the harness (who execute
 
 ### 2. Create a WASM Plugin
 
-Create a WASM module that exports the required functions:
-- `name()` - returns the plugin name
-- `description()` - returns the plugin description
-- `json_schema()` - returns the JSON schema for arguments
-- `execute(args_ptr, args_len)` - executes the plugin with JSON arguments
+Create a WASM module using the Extism Plugin Development Kit (PDK). The plugin must export the following functions:
 
-See the WASM loader implementation for details on the expected interface.
+- `name()` - returns the plugin name as a string
+- `description()` - returns the plugin description as a string
+- `json_schema()` - returns the JSON schema for arguments as a string
+- `execute()` - executes the plugin with JSON arguments and returns JSON result
+
+See the [Plugin API](#plugin-api) section below for detailed documentation on how to implement these functions.
 
 ### 3. Sign and Encrypt Plugin
 
@@ -286,9 +287,75 @@ The plugin payload is encrypted using AES-256-GCM:
 - **Forward Secrecy**: Ephemeral keys used for symmetric key encryption
 - **Key Exchange**: ECDH provides secure key derivation without key material in metadata
 
-### Plugin Interface
+### Plugin API
 
-All plugins must implement:
+Harness uses the **Extism SDK** for WASM plugin execution. Plugins must be written using the **Extism Plugin Development Kit (PDK)** and export the following functions:
+
+#### Required Exported Functions
+
+1. **`name()`** - Returns the plugin name
+   - Input: None
+   - Output: String containing the plugin name
+
+2. **`description()`** - Returns a description of what the plugin does
+   - Input: None
+   - Output: String containing the plugin description
+
+3. **`json_schema()`** - Returns the JSON schema for plugin arguments
+   - Input: None
+   - Output: String containing a JSON schema that describes the expected input arguments
+
+4. **`execute()`** - Executes the plugin with the provided arguments
+   - Input: JSON object (as bytes) containing the plugin arguments
+   - Output: JSON object (as bytes) containing the plugin result
+
+#### Plugin Development
+
+Plugins are developed using the Extism PDK, which provides:
+- **Input/Output handling**: Use `extism_pdk::input()` to read JSON arguments and `extism_pdk::output()` or return values to write results
+- **HTTP requests**: Access to HTTP client functionality for making external API calls
+- **WASI support**: Full WASI capabilities for file I/O, networking, etc.
+
+#### Example Plugin (Rust)
+
+```rust
+use extism_pdk::*;
+use serde_json::Value;
+
+#[plugin_fn]
+pub fn name() -> FnResult<String> {
+    Ok("my-plugin".to_string())
+}
+
+#[plugin_fn]
+pub fn description() -> FnResult<String> {
+    Ok("A plugin that does something useful".to_string())
+}
+
+#[plugin_fn]
+pub fn json_schema() -> FnResult<String> {
+    Ok(r#"{"type":"object","properties":{"message":{"type":"string"}}}"#.to_string())
+}
+
+#[plugin_fn]
+pub fn execute() -> FnResult<Json<Value>> {
+    // Read input JSON args
+    let input: Json<Value> = input()?;
+    
+    // Process the input...
+    
+    // Return JSON result
+    Ok(Json(serde_json::json!({"result": "success"})))
+}
+```
+
+#### Plugin Types
+
+**Note**: Harness currently only supports WASM plugins. Go plugins are not supported. All plugins must be compiled to WebAssembly using the `wasm32-wasip1` target.
+
+#### Plugin Interface (Go)
+
+The internal Go interface that WASM plugins implement:
 
 ```go
 type Plugin interface {
@@ -298,6 +365,8 @@ type Plugin interface {
     Execute(ctx context.Context, args json.RawMessage) (interface{}, error)
 }
 ```
+
+This interface is implemented by the WASM loader, which translates between the Go interface and the Extism SDK calls to the WASM module.
 
 ## Example: Using a WASM Plugin
 
@@ -321,8 +390,9 @@ type Plugin interface {
 
 ## Platform Notes
 
-- **WASM Plugins**: Supported on all platforms via the wazero runtime
+- **WASM Plugins**: Supported on all platforms via the Extism SDK (which uses wazero internally)
 - **Keystore**: Platform-specific implementations for secure key storage
+- **Plugin Types**: Only WASM plugins are supported. Go plugins are not supported.
 
 ## Security Considerations
 
