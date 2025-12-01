@@ -43,8 +43,8 @@ Generate keys for the president (who signs plugins) and the harness (who execute
 
 ```bash
 # Import existing private key into keystore
-./bin/storekey -key president_private.pem -keystore-key "president-key"
-./bin/storekey -key harness_private.pem -keystore-key "harness-key"
+./bin/genkeys -import president_private.pem -keystore-key "president-key" -public president_public.pem
+./bin/genkeys -import harness_private.pem -keystore-key "harness-key" -public harness_public.pem
 
 # After importing, you can safely delete the PEM files
 ```
@@ -115,9 +115,10 @@ Run the harness to load and execute the plugin using a key from the keystore:
 
 ```bash
 # Import an existing private key file into the keystore
-./bin/storekey \
-  -key existing_private.pem \
-  -keystore-key "harness-key"
+./bin/genkeys \
+  -import existing_private.pem \
+  -keystore-key "harness-key" \
+  -public harness_public.pem
 
 # After importing, you can safely delete the PEM file
 ```
