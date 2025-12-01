@@ -363,9 +363,12 @@ All commands support keystore-based keys:
 - **Windows**: Uses Credential Manager (service: `harness`)
 
 **macOS Keychain Configuration:**
-- **Default (recommended)**: No environment variable = uses login keychain (fewer password prompts)
+- **Default (recommended)**: No environment variable = uses login keychain (unlocked when logged in, no password prompts)
 - **Custom keychain**: Set `export HARNESS_KEYCHAIN="harness-keys"` to use the custom "harness-keys" keychain
-- Note: If you have existing keys in "harness-keys", set the environment variable to access them
+- **Reducing password prompts**: 
+  - Use the default login keychain (no `HARNESS_KEYCHAIN` set) for automatic unlocking
+  - Trust the application in Keychain Access: Open Keychain Access → Find "harness" → Right-click → Get Info → Check "Always allow access to this item"
+  - If you see two password prompts, the first is to unlock the keychain, the second is for key access - trusting the application eliminates the second prompt
 
 ## Architecture
 

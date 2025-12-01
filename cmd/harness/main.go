@@ -16,10 +16,10 @@ import (
 
 func main() {
 	var (
-		encryptedFile      = flag.String("file", "", "Path to encrypted plugin file")
-		keystoreKeyID      = flag.String("keystore-key", "", "Key ID in OS keystore (required)")
+		encryptedFile       = flag.String("file", "", "Path to encrypted plugin file")
+		keystoreKeyID       = flag.String("keystore-key", "", "Key ID in OS keystore (required)")
 		presidentPubKeyFile = flag.String("president-key", "", "Path to president's public key file")
-		argsJSON           = flag.String("args", "{}", "JSON arguments to pass to the plugin")
+		argsJSON            = flag.String("args", "{}", "JSON arguments to pass to the plugin")
 	)
 	flag.Parse()
 
@@ -124,4 +124,3 @@ func loadPublicKey(path string) (*ecdsa.PublicKey, error) {
 
 	return ecdsaPubKey, nil
 }
-

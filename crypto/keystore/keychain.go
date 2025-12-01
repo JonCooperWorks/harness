@@ -31,6 +31,8 @@ func NewKeychainKeystore() (Keystore, error) {
 		KeychainName:             keychainName, // Empty = default login keychain, "harness-keys" = custom keychain
 		KeychainPasswordFunc:     nil,         // Use default keychain
 		KeychainTrustApplication: true,
+		// Use login keychain by default (unlocked when logged in, fewer prompts)
+		// Only prompt if using a custom keychain that requires unlocking
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open keychain: %w", err)

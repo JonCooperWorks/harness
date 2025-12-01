@@ -13,8 +13,8 @@ import (
 
 func main() {
 	var (
-		encryptedFile      = flag.String("file", "", "Path to encrypted plugin file")
-		keystoreKeyID      = flag.String("keystore-key", "", "Key ID in OS keystore (required)")
+		encryptedFile       = flag.String("file", "", "Path to encrypted plugin file")
+		keystoreKeyID       = flag.String("keystore-key", "", "Key ID in OS keystore (required)")
 		presidentPubKeyFile = flag.String("president-key", "", "Path to president's public key file")
 	)
 	flag.Parse()
@@ -68,7 +68,7 @@ func main() {
 	fmt.Printf("  Type: %v\n", payload.Type)
 	fmt.Printf("  Name: %s\n", payload.Name)
 	fmt.Printf("  Data size: %d bytes\n", len(payload.Data))
-	
+
 	if payload.Type == crypto.WASM {
 		fmt.Printf("  Note: WASM plugin ready to execute\n")
 	} else {
@@ -102,4 +102,3 @@ func loadPublicKey(path string) (*ecdsa.PublicKey, error) {
 
 	return ecdsaPubKey, nil
 }
-
