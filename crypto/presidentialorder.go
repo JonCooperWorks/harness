@@ -219,35 +219,37 @@ func (po *PresidentialOrderImpl) decryptSymmetricKey(encryptedKey []byte) ([]byt
 	
 	// Decrypt the symmetric key
 	encryptedSymmetricKey := encryptedKey[65:]
-	if len(encryptedSymmetricKey) < 16 { // Need at least IV + some data
+	if len(encryptedSymmetricKey) < 12+16 { // Need at least nonce (12) + tag (16)
 		return nil, errors.New("encrypted symmetric key too short")
 	}
 	
-	// Extract IV (first 16 bytes)
-	iv := encryptedSymmetricKey[:16]
-	ciphertext := encryptedSymmetricKey[16:]
+	// Extract nonce (first 12 bytes)
+	nonce := encryptedSymmetricKey[:12]
+	ciphertext := encryptedSymmetricKey[12:]
 	
 	block, err := aes.NewCipher(aesKey[:])
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 	
-	mode := cipher.NewCBCDecrypter(block, iv)
-	plaintext := make([]byte, len(ciphertext))
-	mode.CryptBlocks(plaintext, ciphertext)
-	
-	// Remove PKCS7 padding
-	plaintext, err = unpadPKCS7(plaintext)
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("failed to remove padding: %w", err)
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+	
+	// Decrypt and verify authentication tag
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
 	}
 	
 	return plaintext, nil
 }
 
-// decryptAES decrypts data using AES-256-CBC
+// decryptAES decrypts data using AES-256-GCM
 func decryptAES(ciphertext, key []byte) ([]byte, error) {
-	if len(ciphertext) < 16 {
+	if len(ciphertext) < 12+16 { // Need at least nonce (12) + tag (16)
 		return nil, errors.New("ciphertext too short")
 	}
 	
@@ -255,47 +257,28 @@ func decryptAES(ciphertext, key []byte) ([]byte, error) {
 		return nil, errors.New("key must be 32 bytes for AES-256")
 	}
 	
-	// Extract IV (first 16 bytes)
-	iv := ciphertext[:16]
-	data := ciphertext[16:]
+	// Extract nonce (first 12 bytes)
+	nonce := ciphertext[:12]
+	data := ciphertext[12:]
 	
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 	
-	mode := cipher.NewCBCDecrypter(block, iv)
-	plaintext := make([]byte, len(data))
-	mode.CryptBlocks(plaintext, data)
-	
-	// Remove PKCS7 padding
-	plaintext, err = unpadPKCS7(plaintext)
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("failed to remove padding: %w", err)
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+	
+	// Decrypt and verify authentication tag
+	plaintext, err := gcm.Open(nil, nonce, data, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt data: %w", err)
 	}
 	
 	return plaintext, nil
-}
-
-// unpadPKCS7 removes PKCS7 padding
-func unpadPKCS7(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, errors.New("data is empty")
-	}
-	
-	padding := int(data[len(data)-1])
-	if padding > len(data) || padding == 0 {
-		return nil, errors.New("invalid padding")
-	}
-	
-	// Verify all padding bytes are the same
-	for i := len(data) - padding; i < len(data); i++ {
-		if data[i] != byte(padding) {
-			return nil, errors.New("invalid padding")
-		}
-	}
-	
-	return data[:len(data)-padding], nil
 }
 
 // parsePrivateKey parses a private key from various formats

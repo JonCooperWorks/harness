@@ -132,7 +132,7 @@ func main() {
 	metadata := map[string]interface{}{
 		"symmetric_key_len": len(encryptedSymmetricKey),
 		"plugin_data_len":   len(encryptedPluginData),
-		"algorithm":         "ECDSA-P256+AES-256-CBC",
+		"algorithm":         "ECDSA-P256+AES-256-GCM",
 	}
 	metadataJSON, err := json.Marshal(metadata)
 	if err != nil {
@@ -273,10 +273,10 @@ func encryptSymmetricKey(symmetricKey []byte, publicKey *ecdsa.PublicKey) ([]byt
 	// Derive AES key from shared secret
 	aesKey := sha256.Sum256(sharedSecret)
 
-	// Encrypt symmetric key with AES
-	iv := make([]byte, 16)
-	if _, err := rand.Read(iv); err != nil {
-		return nil, fmt.Errorf("failed to generate IV: %w", err)
+	// Encrypt symmetric key with AES-GCM
+	nonce := make([]byte, 12) // GCM standard nonce size
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
 	block, err := aes.NewCipher(aesKey[:])
@@ -284,16 +284,16 @@ func encryptSymmetricKey(symmetricKey []byte, publicKey *ecdsa.PublicKey) ([]byt
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	// Pad symmetric key
-	paddedKey := padPKCS7(symmetricKey, block.BlockSize())
+	// Encrypt with GCM
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
 
-	// Encrypt
-	mode := cipher.NewCBCEncrypter(block, iv)
-	ciphertext := make([]byte, len(paddedKey))
-	mode.CryptBlocks(ciphertext, paddedKey)
+	ciphertext := gcm.Seal(nil, nonce, symmetricKey, nil)
 
-	// Build result: [ephemeral_public_key:65][iv:16][ciphertext]
-	result := make([]byte, 0, 65+16+len(ciphertext))
+	// Build result: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
+	result := make([]byte, 0, 65+12+len(ciphertext))
 
 	// Encode ephemeral public key (uncompressed: 0x04 || x || y)
 	ephemeralPubBytes := make([]byte, 65)
@@ -302,16 +302,16 @@ func encryptSymmetricKey(symmetricKey []byte, publicKey *ecdsa.PublicKey) ([]byt
 	copy(ephemeralPubBytes[33:65], ephemeralPrivate.PublicKey.Y.Bytes())
 	result = append(result, ephemeralPubBytes...)
 
-	// Append IV
-	result = append(result, iv...)
+	// Append nonce
+	result = append(result, nonce...)
 
-	// Append ciphertext
+	// Append ciphertext (includes authentication tag)
 	result = append(result, ciphertext...)
 
 	return result, nil
 }
 
-// encryptAES encrypts data using AES-256-CBC
+// encryptAES encrypts data using AES-256-GCM
 func encryptAES(plaintext, key []byte) ([]byte, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("key must be 32 bytes for AES-256")
@@ -322,33 +322,24 @@ func encryptAES(plaintext, key []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	// Generate IV
-	iv := make([]byte, 16)
-	if _, err := rand.Read(iv); err != nil {
-		return nil, fmt.Errorf("failed to generate IV: %w", err)
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	// Pad plaintext
-	paddedPlaintext := padPKCS7(plaintext, block.BlockSize())
+	// Generate nonce (12 bytes is standard for GCM)
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
+	}
 
-	// Encrypt
-	mode := cipher.NewCBCEncrypter(block, iv)
-	ciphertext := make([]byte, len(paddedPlaintext))
-	mode.CryptBlocks(ciphertext, paddedPlaintext)
+	// Encrypt and authenticate (ciphertext includes authentication tag)
+	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
 
-	// Prepend IV
-	result := append(iv, ciphertext...)
+	// Prepend nonce
+	result := append(nonce, ciphertext...)
 
 	return result, nil
-}
-
-// padPKCS7 adds PKCS7 padding
-func padPKCS7(data []byte, blockSize int) []byte {
-	padding := blockSize - (len(data) % blockSize)
-	padtext := make([]byte, padding)
-	for i := range padtext {
-		padtext[i] = byte(padding)
-	}
-	return append(data, padtext...)
 }
 
