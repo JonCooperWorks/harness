@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
@@ -16,24 +14,20 @@ import (
 	"math/big"
 	"os"
 
-	"github.com/joncooperworks/harness/crypto"
 	"github.com/joncooperworks/harness/crypto/keystore"
 )
 
 func main() {
 	var (
-		pluginFile         = flag.String("plugin", "", "Path to plugin file to encrypt")
-		pluginType         = flag.String("type", "wasm", "Plugin type: wasm")
-		pluginName         = flag.String("name", "test-plugin", "Plugin name")
+		encryptedFile      = flag.String("file", "", "Path to encrypted plugin file (from encrypt command)")
 		presidentKeyPath   = flag.String("president-key", "", "Path to president's private key file (optional if using keystore)")
 		presidentKeyID     = flag.String("president-keystore-key", "", "Key ID in OS keystore for president's private key (optional if using key file)")
-		harnessPubKeyPath  = flag.String("harness-key", "", "Path to harness's public key (for encryption)")
-		outputPath         = flag.String("output", "plugin.encrypted", "Path to save encrypted plugin")
+		outputPath         = flag.String("output", "", "Path to save signed plugin (defaults to input file with .signed suffix)")
 	)
 	flag.Parse()
 
-	if *pluginFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -plugin is required\n")
+	if *encryptedFile == "" {
+		fmt.Fprintf(os.Stderr, "Error: -file is required (use ./bin/encrypt first to create encrypted file)\n")
 		os.Exit(1)
 	}
 
@@ -42,9 +36,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *harnessPubKeyPath == "" {
-		fmt.Fprintf(os.Stderr, "Error: -harness-key is required\n")
-		os.Exit(1)
+	if *outputPath == "" {
+		*outputPath = *encryptedFile + ".signed"
 	}
 
 	// Load president's private key (for signing)
@@ -69,76 +62,56 @@ func main() {
 		}
 	}
 
-	// Load harness's public key (for encryption)
-	harnessPubKey, err := loadPublicKey(*harnessPubKeyPath)
+	// Load encrypted file
+	encryptedData, err := os.ReadFile(*encryptedFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading harness's public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error reading encrypted file: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Load plugin file
-	pluginData, err := os.ReadFile(*pluginFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading plugin file: %v\n", err)
+	// Parse encrypted file structure (without signature):
+	// [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	if len(encryptedData) < 4 {
+		fmt.Fprintf(os.Stderr, "Error: encrypted file too short\n")
 		os.Exit(1)
 	}
 
-	// Determine plugin type
-	var pluginTypeEnum crypto.PluginType
-	switch *pluginType {
-	case "wasm":
-		pluginTypeEnum = crypto.WASM
-	default:
-		fmt.Fprintf(os.Stderr, "Error: invalid plugin type %s (must be wasm)\n", *pluginType)
+	offset := 0
+
+	// Read metadata length
+	metadataLen := int(binary.BigEndian.Uint32(encryptedData[offset:offset+4]))
+	offset += 4
+
+	if len(encryptedData) < offset+metadataLen {
+		fmt.Fprintf(os.Stderr, "Error: invalid metadata length\n")
 		os.Exit(1)
 	}
 
-	// Create payload
-	payload := crypto.Payload{
-		Type: pluginTypeEnum,
-		Name: *pluginName,
-		Data: pluginData,
-	}
+	// Read metadata
+	metadataJSON := encryptedData[offset:offset+metadataLen]
+	offset += metadataLen
 
-	// Marshal payload
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling payload: %v\n", err)
+	// Parse metadata to get lengths
+	var metadataStruct struct {
+		SymmetricKeyLen int    `json:"symmetric_key_len"`
+		PluginDataLen   int    `json:"plugin_data_len"`
+		Algorithm       string `json:"algorithm"`
+	}
+	if err := json.Unmarshal(metadataJSON, &metadataStruct); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing metadata: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Generate symmetric key for AES encryption
-	symmetricKey := make([]byte, 32) // AES-256
-	if _, err := rand.Read(symmetricKey); err != nil {
-		fmt.Fprintf(os.Stderr, "Error generating symmetric key: %v\n", err)
+	// Verify we have enough data
+	if len(encryptedData) < offset+metadataStruct.SymmetricKeyLen+metadataStruct.PluginDataLen {
+		fmt.Fprintf(os.Stderr, "Error: encrypted file incomplete\n")
 		os.Exit(1)
 	}
 
-	// Encrypt plugin data with AES
-	encryptedPluginData, err := encryptAES(payloadJSON, symmetricKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error encrypting plugin data: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Encrypt symmetric key using ECDH with harness's public key
-	encryptedSymmetricKey, err := encryptSymmetricKey(symmetricKey, harnessPubKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error encrypting symmetric key: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Create metadata
-	metadata := map[string]interface{}{
-		"symmetric_key_len": len(encryptedSymmetricKey),
-		"plugin_data_len":   len(encryptedPluginData),
-		"algorithm":         "ECDSA-P256+AES-256-GCM",
-	}
-	metadataJSON, err := json.Marshal(metadata)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling metadata: %v\n", err)
-		os.Exit(1)
-	}
+	// Extract encrypted symmetric key and plugin data
+	encryptedSymmetricKey := encryptedData[offset:offset+metadataStruct.SymmetricKeyLen]
+	offset += metadataStruct.SymmetricKeyLen
+	encryptedPluginData := encryptedData[offset:offset+metadataStruct.PluginDataLen]
 
 	// Create data to sign: metadata + encrypted data
 	dataToSign := append(metadataJSON, encryptedSymmetricKey...)
@@ -193,11 +166,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Plugin encrypted and signed successfully:\n")
-	fmt.Printf("  Input: %s\n", *pluginFile)
+	fmt.Printf("Plugin signed successfully:\n")
+	fmt.Printf("  Input: %s\n", *encryptedFile)
 	fmt.Printf("  Output: %s\n", *outputPath)
-	fmt.Printf("  Type: %s\n", *pluginType)
-	fmt.Printf("  Name: %s\n", *pluginName)
 }
 
 // loadPrivateKey loads an ECDSA private key from a file
@@ -231,115 +202,4 @@ func loadPrivateKey(path string) (*ecdsa.PrivateKey, error) {
 	return ecKey, nil
 }
 
-// loadPublicKey loads an ECDSA public key from a file
-func loadPublicKey(path string) (*ecdsa.PublicKey, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read public key file: %w", err)
-	}
-
-	// Try PEM format first
-	block, _ := pem.Decode(data)
-	if block != nil {
-		data = block.Bytes
-	}
-
-	// Parse public key
-	pubKey, err := x509.ParsePKIXPublicKey(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse public key: %w", err)
-	}
-
-	ecdsaPubKey, ok := pubKey.(*ecdsa.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("public key is not ECDSA")
-	}
-
-	return ecdsaPubKey, nil
-}
-
-// encryptSymmetricKey encrypts the symmetric key using ECDH
-func encryptSymmetricKey(symmetricKey []byte, publicKey *ecdsa.PublicKey) ([]byte, error) {
-	// Generate ephemeral key pair for ECDH
-	ephemeralPrivate, err := ecdsa.GenerateKey(publicKey.Curve, rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate ephemeral key: %w", err)
-	}
-
-	// Compute shared secret using ECDH
-	sharedX, _ := publicKey.Curve.ScalarMult(publicKey.X, publicKey.Y, ephemeralPrivate.D.Bytes())
-	sharedSecret := sharedX.Bytes()
-
-	// Derive AES key from shared secret
-	aesKey := sha256.Sum256(sharedSecret)
-
-	// Encrypt symmetric key with AES-GCM
-	nonce := make([]byte, 12) // GCM standard nonce size
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("failed to generate nonce: %w", err)
-	}
-
-	block, err := aes.NewCipher(aesKey[:])
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cipher: %w", err)
-	}
-
-	// Encrypt with GCM
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %w", err)
-	}
-
-	ciphertext := gcm.Seal(nil, nonce, symmetricKey, nil)
-
-	// Build result: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
-	result := make([]byte, 0, 65+12+len(ciphertext))
-
-	// Encode ephemeral public key (uncompressed: 0x04 || x || y)
-	ephemeralPubBytes := make([]byte, 65)
-	ephemeralPubBytes[0] = 0x04
-	copy(ephemeralPubBytes[1:33], ephemeralPrivate.PublicKey.X.Bytes())
-	copy(ephemeralPubBytes[33:65], ephemeralPrivate.PublicKey.Y.Bytes())
-	result = append(result, ephemeralPubBytes...)
-
-	// Append nonce
-	result = append(result, nonce...)
-
-	// Append ciphertext (includes authentication tag)
-	result = append(result, ciphertext...)
-
-	return result, nil
-}
-
-// encryptAES encrypts data using AES-256-GCM
-func encryptAES(plaintext, key []byte) ([]byte, error) {
-	if len(key) != 32 {
-		return nil, fmt.Errorf("key must be 32 bytes for AES-256")
-	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cipher: %w", err)
-	}
-
-	// Create GCM mode
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %w", err)
-	}
-
-	// Generate nonce (12 bytes is standard for GCM)
-	nonce := make([]byte, 12)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("failed to generate nonce: %w", err)
-	}
-
-	// Encrypt and authenticate (ciphertext includes authentication tag)
-	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
-
-	// Prepend nonce
-	result := append(nonce, ciphertext...)
-
-	return result, nil
-}
 

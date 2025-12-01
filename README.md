@@ -175,6 +175,7 @@ This abstraction allows secure, platform-native key storage without exposing pri
 ```bash
 # Build all utilities
 go build -o bin/genkeys ./cmd/genkeys
+go build -o bin/encrypt ./cmd/encrypt
 go build -o bin/sign ./cmd/sign
 go build -o bin/harness ./cmd/harness
 go build -o bin/verify ./cmd/verify
@@ -221,32 +222,42 @@ Create a WASM module using the Extism Plugin Development Kit (PDK). The exploit 
 
 See the [Plugin API](#plugin-api) section below for detailed documentation on how to implement these functions.
 
-### 3. Principal Signs and Encrypts Exploit
+### 3. Encrypt Exploit
 
-The principal signs and encrypts the exploit using their keystore key and the client's public key:
+First, encrypt the exploit using the client's public key:
 
 ```bash
-./bin/sign \
+./bin/encrypt \
   -plugin exploit.wasm \
   -type wasm \
   -name "cve-2024-xxxx-exploit" \
-  -president-keystore-key "principal-key" \
   -harness-key client_harness_public.pem \
   -output exploit.encrypted
 ```
 
-### 4. Client Verifies Exploit (Optional)
+### 4. Principal Signs Encrypted Exploit
 
-The client can verify the encrypted exploit without executing it:
+Then, the principal signs the encrypted exploit:
+
+```bash
+./bin/sign \
+  -file exploit.encrypted \
+  -president-keystore-key "principal-key" \
+  -output exploit.signed
+```
+
+### 5. Client Verifies Exploit (Optional)
+
+The client can verify the signed and encrypted exploit without executing it:
 
 ```bash
 ./bin/verify \
-  -file exploit.encrypted \
+  -file exploit.signed \
   -keystore-key "client-key" \
   -president-key principal_public.pem
 ```
 
-### 5. Client Signs Execution Arguments
+### 6. Client Signs Execution Arguments
 
 The client (President) signs the execution arguments (targeting info) before execution:
 
@@ -259,13 +270,13 @@ The client (President) signs the execution arguments (targeting info) before exe
   -output args.signed
 ```
 
-### 6. Execute Exploit (Requires Both Authorizations)
+### 7. Execute Exploit (Requires Both Authorizations)
 
 The harness verifies both authorizations and executes the exploit:
 
 ```bash
 ./bin/harness \
-  -file exploit.encrypted \
+  -file exploit.signed \
   -president-key principal_public.pem \
   -signed-args args.signed \
   -client-key client_public.pem
@@ -316,22 +327,27 @@ Without both signatures, execution fails cryptographically.
 All commands support keystore-based keys:
 
 ```bash
-# Principal signs an exploit using keystore
-./bin/sign \
+# Encrypt an exploit
+./bin/encrypt \
   -plugin exploit.wasm \
-  -president-keystore-key "principal-key" \
   -harness-key client_harness_public.pem \
   -output exploit.encrypted
 
+# Principal signs the encrypted exploit using keystore
+./bin/sign \
+  -file exploit.encrypted \
+  -president-keystore-key "principal-key" \
+  -output exploit.signed
+
 # Client verifies an exploit using keystore
 ./bin/verify \
-  -file exploit.encrypted \
+  -file exploit.signed \
   -keystore-key "client-harness-key" \
   -president-key principal_public.pem
 
 # Execute an exploit using keystore (requires both authorizations)
 ./bin/harness \
-  -file exploit.encrypted \
+  -file exploit.signed \
   -keystore-key "client-harness-key" \
   -president-key principal_public.pem \
   -args '{}'
@@ -571,18 +587,23 @@ This interface is implemented by the WASM loader, which translates between the G
 ## Example: Using a WASM Exploit
 
 ```bash
-# Principal signs a WASM exploit using keystore
-./bin/sign \
+# Encrypt a WASM exploit
+./bin/encrypt \
   -plugin exploit.wasm \
   -type wasm \
   -name "cve-2024-xxxx-exploit" \
-  -president-keystore-key "principal-key" \
   -harness-key client_harness_public.pem \
   -output exploit.encrypted
 
+# Principal signs the encrypted exploit using keystore
+./bin/sign \
+  -file exploit.encrypted \
+  -president-keystore-key "principal-key" \
+  -output exploit.signed
+
 # Execute it using keystore (requires both authorizations)
 ./bin/harness \
-  -file exploit.encrypted \
+  -file exploit.signed \
   -keystore-key "client-harness-key" \
   -president-key principal_public.pem \
   -args '{"target":"192.168.1.100","port":443}'

@@ -11,4 +11,3 @@ type Keystore interface {
 	// ListKeys returns all key IDs stored in the keystore
 	ListKeys() ([]string, error)
 }
-
