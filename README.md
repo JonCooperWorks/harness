@@ -45,6 +45,22 @@ Both parties must act: principal encrypts (has exploit, no authorization), clien
 
 5. **Compliance Violations**: Helps meet regulatory requirements by enforcing authorization boundaries and maintaining audit trails.
 
+### Replay Attacks & Time-Limited Authorization
+
+**Replays are intentionally allowed** within the expiration window. This design recognizes that penetration testing engagements require multiple verification runs and retesting across different phases. The time-limited expiration (default: 72 hours) provides the control mechanism rather than preventing replays entirely.
+
+**Cryptographic Evidence**: The system provides cryptographic evidence that a pentester received an exploit for a specific target (via the client-signed execution arguments). This creates an audit trail - pentesters cannot run off with exploits undetected, as there is cryptographic proof of:
+- Which exploit they received (encrypted with their public key)
+- Which target they were authorized to test (client-signed arguments)
+- When the authorization expires (signed expiration timestamp)
+
+**Custom Decryptor Risk**: A pentester could theoretically create a custom decryptor that unwraps the payload without executing it through the harness. This risk can be mitigated by:
+- Running exploits on a **locked-down and monitored exploit host** where custom decryptors cannot be deployed
+- Monitoring for unauthorized decryption attempts
+- The cryptographic evidence still shows they received the exploit, even if they bypass execution
+
+**Key Point**: The system provides cryptographic evidence of exploit access and target authorization, creating accountability even if execution is bypassed. The time-limited expiration balances operational flexibility (allowing retesting) with security controls (preventing indefinite access).
+
 ### Why WASM Sandboxing?
 
 Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
