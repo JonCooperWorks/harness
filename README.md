@@ -262,20 +262,21 @@ Client receives the encrypted payload and execution arguments, then signs the ar
 
 ### 5. Execute Exploit (Requires Both Authorizations)
 
-Pentester verifies client signature and decrypts with their private key:
+Pentester verifies client signature and decrypts with their private key. Arguments are automatically extracted from the approved package:
 
 ```bash
 ./bin/harness \
   -file exploit.approved \
   -keystore-key "pentester-key" \
-  -signature-key client_public.pem \
-  -args '{"target":"192.168.1.100","port":443}'
+  -signature-key client_public.pem
 ```
 
 **Note**: Execution requires:
 - ✓ Exploit encrypted with pentester's public key (principal authorization - they have the exploit)
 - ✓ Valid client signature on expiration + execution arguments (client authorization - they approve usage)
 - ✓ Expiration has not passed (time-based authorization)
+
+The execution arguments are automatically extracted from the approved package (signed by the client). You cannot override or change the arguments - they must match what the client signed.
 
 Without all three, execution fails cryptographically. **Nobody can run an exploit unilaterally**.
 
@@ -333,11 +334,11 @@ All commands support keystore-based keys:
   -output exploit.approved
 
 # Pentester executes exploit using keystore (requires both authorizations)
+# Arguments are automatically extracted from the approved package
 ./bin/harness \
   -file exploit.approved \
   -keystore-key "pentester-key" \
-  -signature-key client_public.pem \
-  -args '{"target":"192.168.1.100","port":443}'
+  -signature-key client_public.pem
 ```
 
 ### Platform Support
@@ -602,11 +603,11 @@ This interface is implemented by the WASM loader, which translates between the G
   -output exploit.approved
 
 # Pentester executes it using keystore (requires both authorizations)
+# Arguments are automatically extracted from the approved package
 ./bin/harness \
   -file exploit.approved \
   -keystore-key "pentester-key" \
-  -signature-key client_public.pem \
-  -args '{"target":"192.168.1.100","port":443}'
+  -signature-key client_public.pem
 ```
 
 ## Platform Notes

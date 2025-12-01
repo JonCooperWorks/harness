@@ -19,9 +19,15 @@ import (
 	"github.com/joncooperworks/harness/crypto/keystore"
 )
 
+// DecryptedResult contains both the decrypted payload and the execution arguments
+type DecryptedResult struct {
+	Payload *Payload
+	Args    []byte // JSON arguments extracted from the file
+}
+
 // PresidentialOrder interface for verifying signatures and decrypting payloads
 type PresidentialOrder interface {
-	VerifyAndDecrypt(ciphertextAndMetadata []byte, argsJSON []byte) (*Payload, error)
+	VerifyAndDecrypt(ciphertextAndMetadata []byte) (*DecryptedResult, error)
 }
 
 // PresidentialOrderImpl implements the PresidentialOrder interface
@@ -102,41 +108,80 @@ func NewPresidentialOrderFromFile(privateKeyPath string, clientPubKey *ecdsa.Pub
 // VerifyAndDecrypt verifies the client signature on arguments and decrypts the payload
 // File format: [encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
 // Encrypted payload format: [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
-func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []byte) (*Payload, error) {
+func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedResult, error) {
 	if len(fileData) < 12 {
 		return nil, errors.New("file too short")
 	}
 
 	// Parse from the end: read client signature, expiration, and args
-	// File format: [encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
-	argsJSONBytes := []byte(argsJSON)
-	argsLen := len(argsJSONBytes)
+	// File format (as written by sign command):
+	// [encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
+	//
+	// Working backwards from the end:
+	// - args_json is the last N bytes (where N = args_len)
+	// - args_len is 4 bytes before args_json starts
+	// - expiration is 8 bytes before args_len
+	// - signature ends right before expiration
+	// - sig_len is 4 bytes before signature starts
 
-	// Find args in the file (should be at the end)
-	if len(fileData) < argsLen+4+8 {
+	if len(fileData) < 20 {
 		return nil, errors.New("file too short")
 	}
 
-	// Args start position (args_json starts here)
-	argsStart := len(fileData) - argsLen
+	// Step 1: Read args_len from the last 4 bytes
+	// But wait - args_len tells us how long args_json is, and args_json comes AFTER args_len
+	// So: args_json is at the end, args_len is 4 bytes before args_json starts
+	// We need to find where args_len is by trying different positions
 
-	// Verify args match
-	fileArgsJSON := fileData[argsStart : argsStart+argsLen]
-	if string(fileArgsJSON) != string(argsJSONBytes) {
-		return nil, fmt.Errorf("provided args do not match file args: file has %q, provided %q", string(fileArgsJSON), string(argsJSONBytes))
+	// Try reading args_len from positions near the end
+	// The args_len field tells us the length of args_json that follows it
+	var argsLenPos int
+	var fileArgsJSON []byte
+
+	foundArgsLen := false
+	// Try positions from the end (checking reasonable args_json lengths)
+	for offset := 4; offset < len(fileData) && offset < 1024*1024+4; offset++ {
+		argsLenPos = len(fileData) - offset
+		if argsLenPos < 0 {
+			break
+		}
+
+		// Read potential args_len
+		if argsLenPos+4 > len(fileData) {
+			continue
+		}
+		candidateArgsLen := int(binary.BigEndian.Uint32(fileData[argsLenPos : argsLenPos+4]))
+
+		// Check if args_json would fit (starts right after args_len, ends at file end)
+		argsStart := argsLenPos + 4
+		expectedArgsEnd := argsStart + candidateArgsLen
+		if expectedArgsEnd == len(fileData) {
+			// Validate it looks like JSON
+			if candidateArgsLen > 0 && argsStart < len(fileData) {
+				argsJSON := fileData[argsStart : argsStart+candidateArgsLen]
+				if len(argsJSON) > 0 && (argsJSON[0] == '{' || argsJSON[0] == '[') {
+					fileArgsJSON = argsJSON
+					foundArgsLen = true
+					break
+				}
+			} else if candidateArgsLen == 0 {
+				// Empty args_json is valid
+				fileArgsJSON = []byte{}
+				foundArgsLen = true
+				break
+			}
+		}
 	}
 
-	// Read args_len (4 bytes before args_json)
-	argsLenPos := argsStart - 4
-	if argsLenPos < 0 {
-		return nil, errors.New("file too short for args_len")
-	}
-	argsLenFromFile := int(binary.BigEndian.Uint32(fileData[argsLenPos : argsLenPos+4]))
-	if argsLenFromFile != argsLen {
-		return nil, fmt.Errorf("args length mismatch: file has %d bytes, provided %d bytes", argsLenFromFile, argsLen)
+	if !foundArgsLen {
+		return nil, errors.New("could not find valid args_len")
 	}
 
-	// Read expiration (8 bytes before args_len)
+	if !foundArgsLen {
+		return nil, errors.New("could not find valid args_len")
+	}
+
+	// Step 2: Read expiration (8 bytes before args_len)
 	expirationPos := argsLenPos - 8
 	if expirationPos < 0 {
 		return nil, errors.New("file too short for expiration")
@@ -149,26 +194,36 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 		return nil, fmt.Errorf("payload has expired: expiration was %s, current time is %s", expirationTime.Format(time.RFC3339), time.Now().Format(time.RFC3339))
 	}
 
-	// Now we need to find the signature. The signature is before args_len.
-	// We know the structure is: [payload][sig_len:4][sig][args_len:4][args]
-	// So sig ends at argsLenPos, and sig_len is 4 bytes before sig starts.
-	// But we don't know sig length yet. Let's try reading backwards to find a reasonable sig_len value.
+	// Now we need to find the signature. The signature is before expiration.
+	// Structure: [encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
+	// The signature ends at expirationPos, so we need to find where it starts.
 	// ECDSA P-256 signatures are typically 70-72 bytes in ASN.1 DER format.
 
-	// Try to find sig_len by looking for reasonable values (60-80 bytes)
-	// Start from expirationPos and work backwards
-	// Structure: [sig_len:4][sig][expiration:8][args_len:4][args]
+	// Read backwards from expirationPos to find the signature length
+	// We'll check positions where sig_len could be (4 bytes before where sig would start)
+	// Signature lengths are typically 60-80 bytes for ECDSA P-256
 	foundSigLen := false
 	var clientSigLen int
 	var sigLenPos int
-	for offset := 4; offset < expirationPos && offset < 200; offset += 1 {
-		pos := expirationPos - offset - 4
-		if pos < 0 {
-			break
+
+	// Try reading signature length from positions before expirationPos
+	// We need at least 4 bytes for sig_len, so start from expirationPos - 4 - 80 (max sig len)
+	minPos := expirationPos - 4 - 80
+	if minPos < 0 {
+		minPos = 0
+	}
+
+	// Check positions backwards from expirationPos
+	for pos := expirationPos - 4 - 60; pos >= minPos && pos >= 0; pos-- {
+		// Read potential signature length
+		if pos+4 > expirationPos {
+			continue
 		}
 		sigLenCandidate := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
+
+		// Check if it's a reasonable signature length
 		if sigLenCandidate >= 60 && sigLenCandidate <= 80 {
-			// Check if sig + sig_len + expiration + args_len + args would match
+			// Check if signature would end exactly at expirationPos
 			sigStart := pos + 4
 			sigEnd := sigStart + sigLenCandidate
 			if sigEnd == expirationPos {
@@ -186,7 +241,7 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 
 	// Read client signature
 	sigPos := sigLenPos + 4
-	// Signature should end at expirationPos (8 bytes before argsLenPos)
+	// Signature should end at expirationPos (8 bytes before args_len)
 	if sigPos+clientSigLen != expirationPos {
 		return nil, fmt.Errorf("signature position mismatch: expected sig to end at %d, but expiration starts at %d", sigPos+clientSigLen, expirationPos)
 	}
@@ -195,9 +250,9 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 
 	// Verify client signature on expiration + arguments
 	// Signature covers: expiration (8 bytes) + args_json
-	dataToVerify := make([]byte, 8+len(argsJSONBytes))
+	dataToVerify := make([]byte, 8+len(fileArgsJSON))
 	binary.BigEndian.PutUint64(dataToVerify[0:8], uint64(expirationUnix))
-	copy(dataToVerify[8:], argsJSONBytes)
+	copy(dataToVerify[8:], fileArgsJSON)
 
 	dataHash := sha256.Sum256(dataToVerify)
 	var sig struct {
@@ -269,7 +324,10 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 		return nil, fmt.Errorf("failed to unmarshal payload: %w", err)
 	}
 
-	return &payload, nil
+	return &DecryptedResult{
+		Payload: &payload,
+		Args:    fileArgsJSON,
+	}, nil
 }
 
 // decryptSymmetricKey decrypts the symmetric key using ECDSA key exchange

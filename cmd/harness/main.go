@@ -19,7 +19,6 @@ func main() {
 		encryptedFile       = flag.String("file", "", "Path to approved plugin file (with signature)")
 		keystoreKeyID       = flag.String("keystore-key", "", "Key ID in OS keystore for private key (required)")
 		signaturePubKeyFile = flag.String("signature-key", "", "Path to public key file for verifying signature (required)")
-		argsJSON            = flag.String("args", "", "JSON arguments (must match signed arguments)")
 	)
 	flag.Parse()
 
@@ -35,11 +34,6 @@ func main() {
 
 	if *signaturePubKeyFile == "" {
 		fmt.Fprintf(os.Stderr, "Error: -signature-key is required (public key for verifying signature)\n")
-		os.Exit(1)
-	}
-
-	if *argsJSON == "" {
-		fmt.Fprintf(os.Stderr, "Error: -args is required (must match the signed arguments)\n")
 		os.Exit(1)
 	}
 
@@ -65,36 +59,36 @@ func main() {
 	}
 
 	// Verify client signature on arguments and decrypt
-	payload, err := po.VerifyAndDecrypt(fileData, []byte(*argsJSON))
+	result, err := po.VerifyAndDecrypt(fileData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error verifying and decrypting: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Load plugin
-	plg, err := plugin.LoadPlugin(payload)
+	plg, err := plugin.LoadPlugin(result.Payload)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading plugin: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Parse arguments
+	// Use arguments from the package (extracted from the file)
 	var args json.RawMessage
-	if err := json.Unmarshal([]byte(*argsJSON), &args); err != nil {
+	if err := json.Unmarshal(result.Args, &args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing arguments JSON: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Execute plugin
 	ctx := context.Background()
-	result, err := plg.Execute(ctx, args)
+	execResult, err := plg.Execute(ctx, args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error executing plugin: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Print result
-	resultJSON, err := json.MarshalIndent(result, "", "  ")
+	resultJSON, err := json.MarshalIndent(execResult, "", "  ")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error marshaling result: %v\n", err)
 		os.Exit(1)

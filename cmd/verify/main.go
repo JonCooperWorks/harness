@@ -16,7 +16,6 @@ func main() {
 		encryptedFile     = flag.String("file", "", "Path to approved plugin file (with client signature)")
 		keystoreKeyID     = flag.String("keystore-key", "", "Key ID in OS keystore for pentester's private key (required)")
 		clientPubKeyFile  = flag.String("client-key", "", "Path to client's public key file (required)")
-		argsJSON          = flag.String("args", "", "JSON arguments (must match signed arguments)")
 	)
 	flag.Parse()
 
@@ -32,11 +31,6 @@ func main() {
 
 	if *clientPubKeyFile == "" {
 		fmt.Fprintf(os.Stderr, "Error: -client-key is required (client's public key for verifying argument signature)\n")
-		os.Exit(1)
-	}
-
-	if *argsJSON == "" {
-		fmt.Fprintf(os.Stderr, "Error: -args is required (must match the arguments signed by client)\n")
 		os.Exit(1)
 	}
 
@@ -62,7 +56,7 @@ func main() {
 	}
 
 	// Verify client signature on arguments and decrypt
-	payload, err := po.VerifyAndDecrypt(fileData, []byte(*argsJSON))
+	result, err := po.VerifyAndDecrypt(fileData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error verifying and decrypting: %v\n", err)
 		os.Exit(1)
@@ -71,11 +65,12 @@ func main() {
 	fmt.Printf("✓ Client signature on arguments verified successfully\n")
 	fmt.Printf("✓ Plugin decrypted successfully\n")
 	fmt.Printf("\nPlugin details:\n")
-	fmt.Printf("  Type: %v\n", payload.Type)
-	fmt.Printf("  Name: %s\n", payload.Name)
-	fmt.Printf("  Data size: %d bytes\n", len(payload.Data))
+	fmt.Printf("  Type: %v\n", result.Payload.Type)
+	fmt.Printf("  Name: %s\n", result.Payload.Name)
+	fmt.Printf("  Data size: %d bytes\n", len(result.Payload.Data))
+	fmt.Printf("  Arguments: %s\n", string(result.Args))
 
-	if payload.Type == crypto.WASM {
+	if result.Payload.Type == crypto.WASM {
 		fmt.Printf("  Note: WASM plugin ready to execute\n")
 	} else {
 		fmt.Printf("  Warning: Unknown plugin type\n")
