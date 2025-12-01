@@ -185,6 +185,107 @@ All commands support keystore-based keys:
    - Decrypt symmetric key with harness's private key (ECDH)
    - Decrypt plugin data with symmetric key (AES-256)
 
+### Encrypted File Format Specification
+
+The encrypted plugin file is a binary format with the following structure:
+
+```
+[signature_length:4 bytes][signature][metadata_length:4 bytes][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+```
+
+#### File Layout
+
+| Field | Size | Description |
+|-------|------|-------------|
+| `signature_length` | 4 bytes | Big-endian uint32: length of signature in bytes |
+| `signature` | variable | ASN.1 DER-encoded ECDSA signature (R, S values) |
+| `metadata_length` | 4 bytes | Big-endian uint32: length of metadata JSON in bytes |
+| `metadata` | variable | JSON object containing encryption metadata |
+| `encrypted_symmetric_key` | variable | Encrypted AES-256 symmetric key (see format below) |
+| `encrypted_plugin_data` | variable | Encrypted plugin payload (see format below) |
+
+#### Signature Format
+
+- **Algorithm**: ECDSA with P-256 curve
+- **Encoding**: ASN.1 DER format
+- **Signed Data**: SHA-256 hash of `metadata || encrypted_symmetric_key || encrypted_plugin_data`
+- **Purpose**: Ensures authenticity and integrity of the encrypted plugin
+
+#### Metadata Format (JSON)
+
+```json
+{
+  "symmetric_key_len": <integer>,
+  "plugin_data_len": <integer>,
+  "algorithm": "ECDSA-P256+AES-256-GCM"
+}
+```
+
+- `symmetric_key_len`: Length in bytes of the `encrypted_symmetric_key` field
+- `plugin_data_len`: Length in bytes of the `encrypted_plugin_data` field
+- `algorithm`: Cryptographic algorithm identifier (currently `"ECDSA-P256+AES-256-GCM"`)
+
+#### Encrypted Symmetric Key Format
+
+The symmetric key is encrypted using ECDH key exchange and AES-256-GCM:
+
+```
+[ephemeral_public_key:65 bytes][nonce:12 bytes][ciphertext+tag:variable]
+```
+
+| Field | Size | Description |
+|-------|------|-------------|
+| `ephemeral_public_key` | 65 bytes | Uncompressed ECDSA public key: `0x04 || X (32 bytes) || Y (32 bytes)` |
+| `nonce` | 12 bytes | Random nonce for AES-GCM encryption |
+| `ciphertext+tag` | variable | AES-256-GCM encrypted symmetric key (32 bytes) + authentication tag (16 bytes) |
+
+**Encryption Process:**
+1. Generate ephemeral ECDSA key pair (same curve as harness public key)
+2. Compute shared secret via ECDH: `shared_secret = ECDH(ephemeral_private, harness_public)`
+3. Derive AES-256 key: `aes_key = SHA256(shared_secret)`
+4. Encrypt symmetric key with AES-256-GCM using the derived key
+5. Prepend ephemeral public key and nonce to the ciphertext
+
+#### Encrypted Plugin Data Format
+
+The plugin payload is encrypted using AES-256-GCM:
+
+```
+[nonce:12 bytes][ciphertext+tag:variable]
+```
+
+| Field | Size | Description |
+|-------|------|-------------|
+| `nonce` | 12 bytes | Random nonce for AES-GCM encryption |
+| `ciphertext+tag` | variable | AES-256-GCM encrypted payload JSON + authentication tag (16 bytes) |
+
+**Payload Format (JSON, after decryption):**
+
+```json
+{
+  "type": <uint8>,
+  "name": "<string>",
+  "data": "<base64-encoded-bytes>"
+}
+```
+
+- `type`: Plugin type (0 = WASM)
+- `name`: Plugin name identifier
+- `data`: Base64-encoded plugin binary data (e.g., WASM module). Go's `encoding/json` automatically base64-encodes `[]byte` fields when marshaling.
+
+**Encryption Process:**
+1. Create JSON payload from plugin type, name, and binary data
+2. Encrypt payload JSON with AES-256-GCM using the symmetric key
+3. Prepend nonce to the ciphertext
+
+#### Security Properties
+
+- **Confidentiality**: Plugin data encrypted with AES-256-GCM
+- **Authenticity**: ECDSA signature verifies plugin origin
+- **Integrity**: GCM authentication tags detect tampering
+- **Forward Secrecy**: Ephemeral keys used for symmetric key encryption
+- **Key Exchange**: ECDH provides secure key derivation without key material in metadata
+
 ### Plugin Interface
 
 All plugins must implement:
