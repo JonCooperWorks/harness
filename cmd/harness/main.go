@@ -16,10 +16,10 @@ import (
 
 func main() {
 	var (
-		encryptedFile     = flag.String("file", "", "Path to approved plugin file (with signature)")
-		keystoreKeyID     = flag.String("keystore-key", "", "Key ID in OS keystore for private key (required)")
+		encryptedFile       = flag.String("file", "", "Path to approved plugin file (with signature)")
+		keystoreKeyID       = flag.String("keystore-key", "", "Key ID in OS keystore for private key (required)")
 		signaturePubKeyFile = flag.String("signature-key", "", "Path to public key file for verifying signature (required)")
-		argsJSON          = flag.String("args", "", "JSON arguments (must match signed arguments)")
+		argsJSON            = flag.String("args", "", "JSON arguments (must match signed arguments)")
 	)
 	flag.Parse()
 

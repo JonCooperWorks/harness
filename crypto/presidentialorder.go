@@ -25,10 +25,10 @@ type PresidentialOrder interface {
 
 // PresidentialOrderImpl implements the PresidentialOrder interface
 type PresidentialOrderImpl struct {
-	privateKey      *ecdsa.PrivateKey // Pentester's private key (for decryption)
-	clientPubKey    *ecdsa.PublicKey  // Client's public key (for verifying argument signature)
-	keystore        keystore.Keystore
-	keystoreKeyID   string
+	privateKey    *ecdsa.PrivateKey // Pentester's private key (for decryption)
+	clientPubKey  *ecdsa.PublicKey  // Client's public key (for verifying argument signature)
+	keystore      keystore.Keystore
+	keystoreKeyID string
 }
 
 // NewPresidentialOrderFromKeys creates a new PresidentialOrder from provided keys
@@ -110,21 +110,21 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 	// File format: [encrypted_payload][client_sig_len:4][client_sig][args_len:4][args_json]
 	argsJSONBytes := []byte(argsJSON)
 	argsLen := len(argsJSONBytes)
-	
+
 	// Find args in the file (should be at the end)
 	if len(fileData) < argsLen+4 {
 		return nil, errors.New("file too short")
 	}
-	
+
 	// Args start position (args_json starts here)
 	argsStart := len(fileData) - argsLen
-	
+
 	// Verify args match
 	fileArgsJSON := fileData[argsStart : argsStart+argsLen]
 	if string(fileArgsJSON) != string(argsJSONBytes) {
 		return nil, fmt.Errorf("provided args do not match file args: file has %q, provided %q", string(fileArgsJSON), string(argsJSONBytes))
 	}
-	
+
 	// Read args_len (4 bytes before args_json)
 	argsLenPos := argsStart - 4
 	if argsLenPos < 0 {
@@ -134,13 +134,13 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 	if argsLenFromFile != argsLen {
 		return nil, fmt.Errorf("args length mismatch: file has %d bytes, provided %d bytes", argsLenFromFile, argsLen)
 	}
-	
+
 	// Now we need to find the signature. The signature is before args_len.
 	// We know the structure is: [payload][sig_len:4][sig][args_len:4][args]
 	// So sig ends at argsLenPos, and sig_len is 4 bytes before sig starts.
 	// But we don't know sig length yet. Let's try reading backwards to find a reasonable sig_len value.
 	// ECDSA P-256 signatures are typically 70-72 bytes in ASN.1 DER format.
-	
+
 	// Try to find sig_len by looking for reasonable values (60-80 bytes)
 	// Start from argsLenPos and work backwards
 	foundSigLen := false
@@ -164,11 +164,11 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 			}
 		}
 	}
-	
+
 	if !foundSigLen {
 		return nil, errors.New("could not find valid signature length")
 	}
-	
+
 	// Read client signature
 	sigPos := sigLenPos + 4
 	if sigPos+clientSigLen != argsLenPos {
@@ -255,57 +255,57 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 func (po *PresidentialOrderImpl) decryptSymmetricKey(encryptedKey []byte) ([]byte, error) {
 	// For ECDSA key exchange, we use ECDH (Elliptic Curve Diffie-Hellman)
 	// The encrypted key contains the public key point and the encrypted symmetric key
-	
+
 	if len(encryptedKey) < 65 { // 1 byte prefix + 32 bytes x + 32 bytes y
 		return nil, errors.New("encrypted key too short")
 	}
-	
+
 	// Extract public key point (uncompressed format: 0x04 || x || y)
 	pubKeyBytes := encryptedKey[:65]
 	x := new(big.Int).SetBytes(pubKeyBytes[1:33])
 	y := new(big.Int).SetBytes(pubKeyBytes[33:65])
-	
+
 	// Create public key from point
 	pubKey := &ecdsa.PublicKey{
 		Curve: po.privateKey.Curve,
 		X:     x,
 		Y:     y,
 	}
-	
+
 	// Compute shared secret using ECDH
 	sharedX, _ := pubKey.Curve.ScalarMult(pubKey.X, pubKey.Y, po.privateKey.D.Bytes())
 	sharedSecret := sharedX.Bytes()
-	
+
 	// Derive AES key from shared secret using SHA256
 	aesKey := sha256.Sum256(sharedSecret)
-	
+
 	// Decrypt the symmetric key
 	encryptedSymmetricKey := encryptedKey[65:]
 	if len(encryptedSymmetricKey) < 12+16 { // Need at least nonce (12) + tag (16)
 		return nil, errors.New("encrypted symmetric key too short")
 	}
-	
+
 	// Extract nonce (first 12 bytes)
 	nonce := encryptedSymmetricKey[:12]
 	ciphertext := encryptedSymmetricKey[12:]
-	
+
 	block, err := aes.NewCipher(aesKey[:])
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
-	
+
 	// Create GCM mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCM: %w", err)
 	}
-	
+
 	// Decrypt and verify authentication tag
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
 	}
-	
+
 	return plaintext, nil
 }
 
@@ -314,32 +314,32 @@ func decryptAES(ciphertext, key []byte) ([]byte, error) {
 	if len(ciphertext) < 12+16 { // Need at least nonce (12) + tag (16)
 		return nil, errors.New("ciphertext too short")
 	}
-	
+
 	if len(key) != 32 {
 		return nil, errors.New("key must be 32 bytes for AES-256")
 	}
-	
+
 	// Extract nonce (first 12 bytes)
 	nonce := ciphertext[:12]
 	data := ciphertext[12:]
-	
+
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
-	
+
 	// Create GCM mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCM: %w", err)
 	}
-	
+
 	// Decrypt and verify authentication tag
 	plaintext, err := gcm.Open(nil, nonce, data, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt data: %w", err)
 	}
-	
+
 	return plaintext, nil
 }
 
@@ -350,7 +350,7 @@ func parsePrivateKey(keyData []byte) (*ecdsa.PrivateKey, error) {
 	if block != nil {
 		keyData = block.Bytes
 	}
-	
+
 	// Try PKCS8 format
 	key, err := x509.ParsePKCS8PrivateKey(keyData)
 	if err == nil {
@@ -359,13 +359,12 @@ func parsePrivateKey(keyData []byte) (*ecdsa.PrivateKey, error) {
 		}
 		return nil, errors.New("key is not ECDSA")
 	}
-	
+
 	// Try EC private key format
 	ecKey, err := x509.ParseECPrivateKey(keyData)
 	if err == nil {
 		return ecKey, nil
 	}
-	
+
 	return nil, errors.New("failed to parse private key: unsupported format")
 }
-
