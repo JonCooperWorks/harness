@@ -402,8 +402,3 @@ This interface is implemented by the WASM loader, which translates between the G
 - Signature verification ensures plugin authenticity
 - Encryption ensures plugin confidentiality
 - File-based private keys (`-key` flag) are deprecated and only supported for migration purposes
-
-## License
-
-[Your License Here]
-
