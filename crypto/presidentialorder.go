@@ -143,7 +143,7 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 	}
 	expirationUnix := int64(binary.BigEndian.Uint64(fileData[expirationPos : expirationPos+8]))
 	expirationTime := time.Unix(expirationUnix, 0)
-	
+
 	// Verify expiration has not passed
 	if time.Now().After(expirationTime) {
 		return nil, fmt.Errorf("payload has expired: expiration was %s, current time is %s", expirationTime.Format(time.RFC3339), time.Now().Format(time.RFC3339))
@@ -198,7 +198,7 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte, argsJSON []by
 	dataToVerify := make([]byte, 8+len(argsJSONBytes))
 	binary.BigEndian.PutUint64(dataToVerify[0:8], uint64(expirationUnix))
 	copy(dataToVerify[8:], argsJSONBytes)
-	
+
 	dataHash := sha256.Sum256(dataToVerify)
 	var sig struct {
 		R, S *big.Int

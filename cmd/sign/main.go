@@ -81,7 +81,7 @@ func main() {
 	dataToSign := make([]byte, 8+len(argsBytes))
 	binary.BigEndian.PutUint64(dataToSign[0:8], uint64(expirationUnix))
 	copy(dataToSign[8:], argsBytes)
-	
+
 	hash := sha256.Sum256(dataToSign)
 	r, s, err := ecdsa.Sign(rand.Reader, clientKey, hash[:])
 	if err != nil {

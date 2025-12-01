@@ -1,6 +1,6 @@
 # Harness - Dual-Authorization Exploit Execution System
 
-A cryptographically secure system for storing, transporting, approving, and executing sensitive payloads including zero-day exploits and high-risk penetration testing tools. Harness enforces **dual-authorization** through cryptographic signatures and encryption, ensuring that exploits cannot be executed without explicit approval from both the principal (firm leadership) and the client (President).
+A cryptographically secure system for storing, transporting, approving, and executing sensitive payloads including zero-day exploits and high-risk penetration testing tools. Harness enforces **dual-authorization** through cryptographic encryption and signatures, ensuring that exploits cannot be executed without explicit approval from both the principal (firm leadership) and the client (President).
 
 ## Purpose
 
@@ -18,16 +18,16 @@ Harness implements a two-party authorization system where **nobody can run an ex
 
 1. **Principal Authorization**: Firm leadership (principal) encrypts exploit payloads with the pentester's public key. The principal has the exploit but **cannot authorize its use** - they only encrypt it. The exploit remains confidential until execution.
 
-2. **Client Authorization**: The client (President) receives the encrypted payload along with execution arguments (targeting information). The client cryptographically signs the arguments, proving approval of the specific targeting parameters. The client has **authorization power but not the exploit** - they can approve usage but cannot decrypt or execute.
+2. **Client Authorization**: The client (President) receives the encrypted payload along with execution arguments (targeting information). The client cryptographically signs the arguments and expiration, proving approval of the specific targeting parameters. The client has **authorization power but not the exploit** - they can approve usage but cannot decrypt or execute.
 
 3. **Execution**: The pentester receives the encrypted payload with client-signed arguments and executes:
-   - Verifies the client's signature on the execution arguments (proves client approval of targeting)
+   - Verifies the client's signature on the execution arguments + expiration (proves client approval of targeting)
    - Decrypts the exploit using their private key (pentester can decrypt because principal encrypted it for them)
    - Executes in WASM sandbox without prior knowledge of exploit details
 
 **Result**: A pentester cannot execute an exploit unless:
 - ✓ The principal encrypted it with the pentester's public key (principal authorization - they have the exploit)
-- ✓ The client signed the execution arguments (client authorization - they approve usage)
+- ✓ The client signed the execution arguments + expiration (client authorization - they approve usage)
 
 Both parties must act: principal encrypts (has exploit, no authorization), client signs args (has authorization, no exploit), pentester executes (can decrypt, needs both).
 
@@ -35,13 +35,13 @@ Both parties must act: principal encrypts (has exploit, no authorization), clien
 
 ### Threats Addressed
 
-1. **Rogue Pentester Modification**: Prevents pentesters from modifying payloads after signing. The principal's signature covers the entire encrypted payload, making tampering detectable.
+1. **Unauthorized Execution**: Ensures exploits cannot be executed without client authorization. The client's signature on execution arguments + expiration is required, and without it, execution is cryptographically impossible.
 
-2. **Unauthorized Execution**: Ensures exploits cannot be executed without client authorization. The client's private key (harness key) is required for decryption, and without it, execution is cryptographically impossible.
+2. **Exploit Confidentiality**: Protects exploit code from exposure during transit or storage. Payloads are encrypted with AES-256-GCM, and the symmetric key is encrypted using ECDH with the pentester's public key.
 
-3. **Exploit Confidentiality**: Protects exploit code from exposure during transit or storage. Payloads are encrypted with AES-256-GCM, and the symmetric key is encrypted using ECDH with the client's public key.
+3. **Chain-of-Custody**: Provides cryptographic proof of who approved what and when. Signatures are non-repudiable and verifiable.
 
-4. **Chain-of-Custody**: Provides cryptographic proof of who approved what and when. Signatures are non-repudiable and verifiable.
+4. **Stale Approvals**: Expiration timestamps prevent execution of old approvals. The expiration is cryptographically signed along with arguments, ensuring it cannot be tampered with.
 
 5. **Compliance Violations**: Helps meet regulatory requirements by enforcing authorization boundaries and maintaining audit trails.
 
@@ -83,7 +83,7 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 └──────┬──────┘
        │
        │ 3. Reviews encrypted payload and arguments
-       │ 4. Signs arguments with client private key
+       │ 4. Signs arguments + expiration with client private key
        │    (Client has authorization but not exploit)
        │ 5. Returns approved payload to pentester
        │
@@ -92,7 +92,7 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 │  Pentester  │
 └──────┬──────┘
        │
-       │ 6. Verifies client signature on arguments ✓
+       │ 6. Verifies client signature on arguments + expiration ✓
        │ 7. Decrypts exploit with pentester private key ✓
        │ 8. Loads WASM payload (never sees plaintext)
        │ 9. Executes in sandbox with signed args
@@ -113,20 +113,21 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
    - **Principal does NOT sign** - they have the exploit but cannot authorize its use
    - Sends encrypted payload + arguments to client
 
-2. **Client → Signs Arguments**
+2. **Client → Signs Arguments + Expiration**
    - Client (President) reviews the encrypted payload and execution arguments
-   - Client signs the execution arguments with their private key (ECDSA)
-   - This signature proves client approval of the specific targeting parameters
+   - Client signs the expiration timestamp + execution arguments with their private key (ECDSA)
+   - This signature proves client approval of the specific targeting parameters and expiration time
    - **Client cannot decrypt** - they have authorization power but not the exploit
-   - Client returns the approved payload (with signed arguments) to the pentester
+   - Client returns the approved payload (with signed arguments + expiration) to the pentester
 
 3. **Pentester → Verifies Client Signature → Decrypts → Executes**
-   - Verifies client's signature on the execution arguments (proves client approval)
+   - Verifies expiration has not passed (reject if expired)
+   - Verifies client's signature on expiration + execution arguments (proves client approval)
    - Decrypts exploit using pentester's private key (principal authorized them via encryption)
    - Loads WASM module directly into sandbox (pentester never sees plaintext exploit)
    - Executes with client-signed arguments
 
-**Key Point**: Nobody can run an exploit unilaterally. Principal encrypts (has exploit, no authorization), client signs args (has authorization, no exploit), pentester executes (can decrypt, needs both authorizations).
+**Key Point**: Nobody can run an exploit unilaterally. Principal encrypts (has exploit, no authorization), client signs args+expiration (has authorization, no exploit), pentester executes (can decrypt, needs both authorizations and valid expiration).
 
 ## Authorization Model Explained
 
@@ -139,11 +140,11 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 - **Storage**: Encrypted exploits are stored in the firm's stockpile (reusable, unsigned)
 - **If missing**: Pentester cannot decrypt - execution fails cryptographically
 
-### Client Signature (Execution Arguments)
+### Client Signature (Execution Arguments + Expiration)
 
-- **Purpose**: Proves the client (President) has approved the specific targeting parameters for execution
+- **Purpose**: Proves the client (President) has approved the specific targeting parameters and expiration time for execution
 - **Algorithm**: ECDSA with P-256 curve
-- **What it signs**: SHA-256 hash of the execution arguments JSON (targeting info: IPs, ports, etc.)
+- **What it signs**: SHA-256 hash of `expiration (8 bytes) || execution_arguments_json`
 - **Verification**: Pentester verifies this signature before execution
 - **Storage**: Client's private key stored in OS keystore via the `Keystore` interface (Keychain/Credential Manager/libsecret)
 - **If missing**: Execution fails immediately - cannot proceed without client approval of targeting
@@ -174,7 +175,7 @@ This abstraction allows secure, platform-native key storage without exposing pri
 - **WASM Sandboxing**: Exploit payloads executed in isolated WebAssembly sandboxes via Extism SDK
 - **OS Keystore Integration**: Private keys stored securely using platform-native keystores
 - **Memory-Based Loading**: Exploits loaded directly from memory, never written to disk unencrypted
-- **Dual-Authorization**: Requires both principal signature and client key for execution
+- **Dual-Authorization**: Requires both principal encryption (control of payload) and client signature (control of authorization)
 
 ## Building
 
@@ -192,13 +193,9 @@ go build -o bin/listkeys ./cmd/listkeys
 
 ### 1. Generate Keys
 
-Generate keys for the principal (who signs exploits), the client (who signs execution arguments), and the pentester (who executes). **Private keys are stored in the OS keystore and never written to disk.**
+Generate keys for the client (who signs execution arguments) and the pentester (who executes). **Private keys are stored in the OS keystore and never written to disk.**
 
 ```bash
-# Generate principal's keys (for signing exploits)
-# Private key stored in keystore, only public key written to disk
-./bin/genkeys -keystore-key "principal-key" -public principal_public.pem
-
 # Generate client's keys (for signing execution arguments)
 # Private key stored in keystore, only public key written to disk
 ./bin/genkeys -keystore-key "client-key" -public client_public.pem
@@ -215,7 +212,6 @@ Generate keys for the principal (who signs exploits), the client (who signs exec
 
 ```bash
 # Import existing private key into keystore
-./bin/genkeys -import principal_private.pem -keystore-key "principal-key" -public principal_public.pem
 ./bin/genkeys -import client_private.pem -keystore-key "client-key" -public client_public.pem
 ./bin/genkeys -import pentester_private.pem -keystore-key "pentester-key" -public pentester_public.pem
 
@@ -246,48 +242,42 @@ Principal encrypts the exploit using the pentester's public key:
   -output exploit.encrypted
 ```
 
-### 4. Principal Signs Encrypted Exploit
+### 4. Client Signs Execution Arguments
 
-Principal signs the encrypted exploit:
+Client receives the encrypted payload and execution arguments, then signs the arguments + expiration (client has authorization but not the exploit):
 
 ```bash
 ./bin/sign \
   -file exploit.encrypted \
-  -president-keystore-key "principal-key" \
-  -output exploit.signed
-```
-
-### 5. Client Signs Execution Arguments
-
-Client receives the encrypted payload and execution arguments, then signs the arguments:
-
-```bash
-# Client signs the execution arguments (targeting information)
-./bin/sign-args \
-  -file exploit.signed \
+  -client-keystore-key "client-key" \
   -args '{"target":"192.168.1.100","port":443}' \
-  -keystore-key "client-key" \
+  -expiration 72h \
   -output exploit.approved
 ```
 
-### 6. Execute Exploit (Requires Both Authorizations)
+**Expiration**: The `-expiration` flag sets how long the payload remains valid. Default is `72h` (3 days). The expiration is cryptographically signed along with the arguments, ensuring it cannot be tampered with. Examples:
+- `-expiration 24h` - expires in 24 hours
+- `-expiration 168h` - expires in 1 week
+- `-expiration 30m` - expires in 30 minutes
 
-Pentester verifies both signatures and executes the exploit:
+### 5. Execute Exploit (Requires Both Authorizations)
+
+Pentester verifies client signature and decrypts with their private key:
 
 ```bash
 ./bin/harness \
   -file exploit.approved \
   -keystore-key "pentester-key" \
-  -president-key principal_public.pem \
-  -client-key client_public.pem \
+  -signature-key client_public.pem \
   -args '{"target":"192.168.1.100","port":443}'
 ```
 
 **Note**: Execution requires:
-- ✓ Valid principal signature on exploit payload (verified with `principal_public.pem`)
-- ✓ Valid client signature on execution arguments (verified with `client_public.pem`)
+- ✓ Exploit encrypted with pentester's public key (principal authorization - they have the exploit)
+- ✓ Valid client signature on expiration + execution arguments (client authorization - they approve usage)
+- ✓ Expiration has not passed (time-based authorization)
 
-Without both signatures, execution fails cryptographically. The pentester executes without prior knowledge of the exploit contents.
+Without all three, execution fails cryptographically. **Nobody can run an exploit unilaterally**.
 
 ## OS Keystore Integration
 
@@ -300,8 +290,8 @@ Without both signatures, execution fails cryptographically. The pentester execut
 ```bash
 # Generate a new key pair, store private key in keystore, output only public key
 ./bin/genkeys \
-  -keystore-key "client-harness-key" \
-  -public client_harness_public.pem
+  -keystore-key "client-key" \
+  -public client_public.pem
 ```
 
 **Import existing PEM keys** (one-time import into keystore):
@@ -310,8 +300,8 @@ Without both signatures, execution fails cryptographically. The pentester execut
 # Import an existing private key file into the keystore
 ./bin/genkeys \
   -import existing_private.pem \
-  -keystore-key "client-harness-key" \
-  -public client_harness_public.pem
+  -keystore-key "client-key" \
+  -public client_public.pem
 
 # After importing, you can safely delete the PEM file
 ```
@@ -334,25 +324,19 @@ All commands support keystore-based keys:
   -harness-key pentester_public.pem \
   -output exploit.encrypted
 
-# Principal signs the encrypted exploit using keystore
+# Client signs execution arguments using keystore
 ./bin/sign \
   -file exploit.encrypted \
-  -president-keystore-key "principal-key" \
-  -output exploit.signed
-
-# Client signs execution arguments using keystore
-./bin/sign-args \
-  -file exploit.signed \
+  -client-keystore-key "client-key" \
   -args '{"target":"192.168.1.100","port":443}' \
-  -keystore-key "client-key" \
+  -expiration 72h \
   -output exploit.approved
 
 # Pentester executes exploit using keystore (requires both authorizations)
 ./bin/harness \
   -file exploit.approved \
   -keystore-key "pentester-key" \
-  -president-key principal_public.pem \
-  -client-key client_public.pem \
+  -signature-key client_public.pem \
   -args '{"target":"192.168.1.100","port":443}'
 ```
 
@@ -406,27 +390,30 @@ All commands support keystore-based keys:
 The encrypted exploit file format (after client signing) is:
 
 ```
-[metadata_length:4 bytes][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4 bytes][client_sig][args_len:4 bytes][args_json]
+[metadata_length:4 bytes][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4 bytes][client_sig][expiration:8 bytes][args_len:4 bytes][args_json]
 ```
 
 #### File Layout
 
 | Field | Size | Description |
 |-------|------|-------------|
-| `signature_length` | 4 bytes | Big-endian uint32: length of signature in bytes |
-| `signature` | variable | ASN.1 DER-encoded ECDSA signature (R, S values) |
 | `metadata_length` | 4 bytes | Big-endian uint32: length of metadata JSON in bytes |
 | `metadata` | variable | JSON object containing encryption metadata |
 | `encrypted_symmetric_key` | variable | Encrypted AES-256 symmetric key (see format below) |
 | `encrypted_plugin_data` | variable | Encrypted exploit payload (see format below) |
+| `client_sig_len` | 4 bytes | Big-endian uint32: length of client signature in bytes |
+| `client_sig` | variable | ASN.1 DER-encoded ECDSA signature (R, S values) |
+| `expiration` | 8 bytes | Big-endian uint64: Unix timestamp (seconds) when payload expires |
+| `args_len` | 4 bytes | Big-endian uint32: length of arguments JSON in bytes |
+| `args_json` | variable | JSON object containing execution arguments |
 
-#### Signature Format
+#### Client Signature Format
 
 - **Algorithm**: ECDSA with P-256 curve
 - **Encoding**: ASN.1 DER format
-- **Signed Data**: SHA-256 hash of `metadata || encrypted_symmetric_key || encrypted_plugin_data`
-- **Purpose**: Ensures authenticity and integrity of the encrypted exploit
-- **Authorization**: Proves principal has reviewed and approved the exploit
+- **Signed Data**: SHA-256 hash of `expiration (8 bytes) || args_json`
+- **Purpose**: Ensures authenticity and integrity of the execution arguments and expiration
+- **Authorization**: Proves client has reviewed and approved the specific targeting parameters and expiration time
 
 #### Metadata Format (JSON)
 
@@ -463,7 +450,7 @@ The symmetric key is encrypted using ECDH key exchange and AES-256-GCM:
 4. Encrypt symmetric key with AES-256-GCM using the derived key
 5. Prepend ephemeral public key and nonce to the ciphertext
 
-**Note**: The symmetric key is encrypted with the pentester's public key, allowing the pentester to decrypt and execute. The client separately signs the execution arguments to approve targeting.
+**Note**: The symmetric key is encrypted with the pentester's public key, allowing the pentester to decrypt and execute. The client separately signs the execution arguments + expiration to approve targeting.
 
 #### Encrypted Exploit Data Format
 
@@ -500,11 +487,11 @@ The exploit payload is encrypted using AES-256-GCM:
 #### Security Properties
 
 - **Confidentiality**: Exploit data encrypted with AES-256-GCM
-- **Authenticity**: ECDSA signature verifies exploit origin and principal approval
+- **Authenticity**: Client's ECDSA signature verifies execution arguments and expiration approval
 - **Integrity**: GCM authentication tags detect tampering
 - **Forward Secrecy**: Ephemeral keys used for symmetric key encryption
 - **Key Exchange**: ECDH provides secure key derivation without key material in metadata
-- **Dual Authorization**: Requires both principal signature on exploit payload and client signature on execution arguments
+- **Dual Authorization**: Requires both principal encryption (control of payload) and client signature (control of authorization)
 
 ## Plugin API
 
@@ -606,25 +593,19 @@ This interface is implemented by the WASM loader, which translates between the G
   -harness-key pentester_public.pem \
   -output exploit.encrypted
 
-# Principal signs the encrypted exploit using keystore
+# Client signs execution arguments using keystore
 ./bin/sign \
   -file exploit.encrypted \
-  -president-keystore-key "principal-key" \
-  -output exploit.signed
-
-# Client signs execution arguments using keystore
-./bin/sign-args \
-  -file exploit.signed \
+  -client-keystore-key "client-key" \
   -args '{"target":"192.168.1.100","port":443}' \
-  -keystore-key "client-key" \
+  -expiration 72h \
   -output exploit.approved
 
 # Pentester executes it using keystore (requires both authorizations)
 ./bin/harness \
   -file exploit.approved \
   -keystore-key "pentester-key" \
-  -president-key principal_public.pem \
-  -client-key client_public.pem \
+  -signature-key client_public.pem \
   -args '{"target":"192.168.1.100","port":443}'
 ```
 
@@ -647,8 +628,8 @@ Harness helps penetration testing teams meet compliance requirements for:
 
 Harness enforces authorization boundaries by:
 
-- Requiring explicit principal approval (cryptographic signature on exploit)
-- Requiring explicit client approval (signature on execution arguments)
+- Requiring explicit principal encryption (control of which exploit is available)
+- Requiring explicit client approval (signature on execution arguments + expiration)
 - Preventing unauthorized modification (signature verification)
 - Maintaining chain-of-custody (cryptographic proof of approval)
 
@@ -656,7 +637,7 @@ Harness enforces authorization boundaries by:
 
 The dual-authorization model provides liability protections by:
 
-- Proving both parties approved execution (non-repudiable signatures)
+- Proving both parties approved execution (non-repudiable signatures and encryption)
 - Preventing unauthorized execution (cryptographic enforcement)
 - Maintaining audit trails (verifiable signatures and keystore access logs)
 - Enforcing sandboxed execution (WASM isolation)
@@ -664,9 +645,9 @@ The dual-authorization model provides liability protections by:
 ## Security Considerations
 
 - **Private keys are stored in OS keystore** - never written to disk
-- Principal's public key should be distributed securely
+- Public keys should be distributed securely
 - Encrypted exploits can be distributed over insecure channels
-- Signature verification ensures exploit authenticity and principal approval
+- Client signature verification ensures execution arguments and expiration approval
 - Encryption ensures exploit confidentiality
-- Client authorization is enforced cryptographically (signature on execution arguments required)
+- Client authorization is enforced cryptographically (signature on execution arguments + expiration required)
 - WASM sandboxing prevents exploits from affecting the host system
