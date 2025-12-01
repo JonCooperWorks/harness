@@ -16,16 +16,17 @@ Harness is designed for offensive security teams and penetration testers who nee
 
 Harness implements a two-party authorization system:
 
-1. **Principal Authorization**: Firm leadership (principal) cryptographically signs and encrypts exploit payloads using their private key, creating a stockpile of approved exploits. These exploits are reusable and can be stored securely. The principal's signature proves the exploit has been reviewed and approved by authorized personnel.
+1. **Principal Authorization**: Firm leadership (principal) encrypts exploit payloads with the pentester's public key and signs the encrypted payload. This ensures the pentester can decrypt and execute, but the exploit remains confidential until execution. The principal's signature proves the exploit has been reviewed and approved by authorized personnel.
 
-2. **Client Authorization**: The client (President) must possess the harness private key (stored in OS keystore) to decrypt and execute the exploit. The symmetric key is encrypted with the client's public key (ECDH), making decryption cryptographically impossible without the client's private key. Possession of the harness key represents explicit client approval for execution.
+2. **Client Authorization**: The client (President) receives the encrypted payload along with execution arguments (targeting information). The client cryptographically signs the arguments, proving approval of the specific targeting parameters. This signature is attached to the payload before it's returned to the pentester.
 
-3. **Execution**: The harness verifies both authorizations before execution:
-   - Verifies the principal's signature on the exploit payload (proves principal approval of the exploit)
-   - Requires the client's private key to decrypt (proves client approval - key possession = approval)
-   - Only executes if both conditions are met
+3. **Execution**: The pentester receives the encrypted payload with client-signed arguments and executes:
+   - Verifies the principal's signature on the exploit payload (proves principal approval)
+   - Verifies the client's signature on the execution arguments (proves client approval of targeting)
+   - Decrypts the exploit using their private key (pentester can decrypt but doesn't inspect the exploit)
+   - Executes in WASM sandbox without knowledge of exploit details
 
-**Result**: A pentester cannot execute an exploit unless both the principal has signed the exploit payload AND the client has provided their harness private key (representing approval). Both parties must cryptographically approve - principal signs the exploit, client provides their decryption key.
+**Result**: A pentester cannot execute an exploit unless both the principal has signed the exploit payload AND the client has signed the execution arguments. The pentester executes the exploit without prior knowledge of its contents, as it remains encrypted until loaded into the sandbox.
 
 ## Threat Model & Rationale
 
@@ -57,20 +58,20 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 ```
 ┌─────────────┐
 │  Principal  │
-│ (Firm Lead)  │
+│ (Firm Lead) │
 └──────┬──────┘
        │
-       │ 1. Signs exploit WASM with principal private key
-       │ 2. Encrypts exploit with AES-256-GCM
-       │ 3. Stores in exploit stockpile
+       │ 1. Encrypts exploit with pentester's public key
+       │ 2. Signs encrypted payload with principal private key
+       │ 3. Creates execution arguments (targeting info)
        │
        ▼
 ┌─────────────────────────┐
-│  Exploit Stockpile       │
-│  (signed + encrypted)   │
+│  Encrypted Payload + Args │
+│  (signed by principal)   │
 └──────┬──────────────────┘
        │
-       │ Exploit distributed to client
+       │ Sent to client for approval
        │
        ▼
 ┌─────────────┐
@@ -78,18 +79,20 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 │ (President) │
 └──────┬──────┘
        │
-       │ 4. Reviews exploit
-       │ 5. Provides harness private key (client approval)
+       │ 4. Reviews encrypted payload and arguments
+       │ 5. Signs arguments with client private key
+       │ 6. Returns signed payload to pentester
        │
        ▼
 ┌─────────────┐
-│   Harness   │
+│  Pentester  │
 └──────┬──────┘
        │
-       │ 6. Verifies principal signature on exploit ✓
-       │ 7. Decrypts with client private key ✓
-       │ 8. Loads WASM payload
-       │ 9. Executes with provided args in sandbox
+       │ 7. Verifies principal signature on payload ✓
+       │ 8. Verifies client signature on arguments ✓
+       │ 9. Decrypts exploit with pentester private key
+       │ 10. Loads WASM payload (never sees plaintext)
+       │ 11. Executes in sandbox with signed args
        │
        ▼
 ┌─────────────┐
@@ -100,25 +103,27 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 
 ### Workflow Steps
 
-1. **Principal → Signs + Encrypts Exploit (Stockpile Creation)**
+1. **Principal → Encrypts + Signs Exploit**
    - Principal reviews and approves the exploit WASM payload
+   - Encrypts exploit with pentester's public key (ECDH + AES-256-GCM)
    - Signs the encrypted payload with principal's private key (ECDSA)
-   - Encrypts exploit with AES-256-GCM
-   - Stores in firm's exploit stockpile (reusable)
+   - Creates execution arguments (targeting information: IPs, ports, etc.)
+   - Sends encrypted payload + arguments to client
 
-2. **Client → Approves + Provides Key**
-   - Client (President) reviews the exploit and approves execution
-   - Client provides harness private key (stored in OS keystore)
-   - This key is required to decrypt the exploit, representing client approval
+2. **Client → Signs Arguments**
+   - Client (President) reviews the encrypted payload and execution arguments
+   - Client signs the execution arguments with their private key (ECDSA)
+   - This signature proves client approval of the specific targeting parameters
+   - Client returns the signed payload to the pentester
 
-3. **Harness → Verifies Both → Decrypts → Executes**
+3. **Pentester → Verifies Both → Decrypts → Executes**
    - Verifies principal's signature on the exploit payload (proves principal approval)
-   - Decrypts symmetric key using client's private key (proves client approval)
-   - Decrypts exploit payload
-   - Loads WASM module into sandbox
-   - Executes with provided arguments
+   - Verifies client's signature on the execution arguments (proves client approval)
+   - Decrypts exploit using pentester's private key
+   - Loads WASM module directly into sandbox (pentester never sees plaintext exploit)
+   - Executes with client-signed arguments
 
-**Key Point**: The firm maintains a stockpile of signed exploits (reusable). The client must provide their harness private key to decrypt and execute. Both authorizations are required - principal signs the exploit, client provides their decryption key.
+**Key Point**: The pentester executes the exploit without prior knowledge of its contents. The exploit remains encrypted until loaded into the WASM sandbox. Both signatures are required - principal signs the exploit, client signs the targeting arguments.
 
 ## Dual Signatures Explained
 
@@ -131,22 +136,23 @@ Exploit payloads are executed within WebAssembly (WASM) sandboxes for:
 - **Storage**: Signed exploits are stored in the firm's stockpile (reusable)
 - **If missing**: Execution fails immediately with "signature verification failed"
 
-### Client Authorization (Harness Key)
+### Client Signature (Execution Arguments)
 
-- **Purpose**: Proves the client (President) has approved execution of the exploit
-- **Mechanism**: The symmetric key is encrypted with the client's public key (ECDH)
-- **Requirement**: Client must provide harness private key to decrypt
+- **Purpose**: Proves the client (President) has approved the specific targeting parameters for execution
+- **Algorithm**: ECDSA with P-256 curve
+- **What it signs**: SHA-256 hash of the execution arguments JSON (targeting info: IPs, ports, etc.)
+- **Verification**: Pentester verifies this signature before execution
 - **Storage**: Client's private key stored in OS keystore via the `Keystore` interface (Keychain/Credential Manager/libsecret)
-- **If missing**: Decryption is cryptographically impossible, execution cannot proceed
+- **If missing**: Execution fails immediately - cannot proceed without client approval of targeting
 
 ### Execution Requirements
 
 Execution is **cryptographically impossible** without both:
 
 1. ✓ Valid principal signature on exploit payload (verified with principal's public key)
-2. ✓ Client's harness private key (required for decryption)
+2. ✓ Valid client signature on execution arguments (verified with client's public key)
 
-Both conditions must be met. Missing either authorization results in immediate failure.
+Both signatures must be present and valid. Missing either authorization results in immediate failure.
 
 ### Keystore Interface
 
@@ -182,16 +188,20 @@ go build -o bin/listkeys ./cmd/listkeys
 
 ### 1. Generate Keys
 
-Generate keys for the principal (who signs exploits) and the client (who approves execution). **Private keys are stored in the OS keystore and never written to disk.**
+Generate keys for the principal (who signs exploits), the client (who signs execution arguments), and the pentester (who executes). **Private keys are stored in the OS keystore and never written to disk.**
 
 ```bash
 # Generate principal's keys (for signing exploits)
 # Private key stored in keystore, only public key written to disk
 ./bin/genkeys -keystore-key "principal-key" -public principal_public.pem
 
-# Generate client's harness keys (for decryption/approval)
+# Generate client's keys (for signing execution arguments)
 # Private key stored in keystore, only public key written to disk
-./bin/genkeys -keystore-key "client-harness-key" -public client_harness_public.pem
+./bin/genkeys -keystore-key "client-key" -public client_public.pem
+
+# Generate pentester's keys (for decrypting and executing exploits)
+# Private key stored in keystore, only public key written to disk
+./bin/genkeys -keystore-key "pentester-key" -public pentester_public.pem
 
 # List all keys in keystore
 ./bin/listkeys
@@ -202,7 +212,8 @@ Generate keys for the principal (who signs exploits) and the client (who approve
 ```bash
 # Import existing private key into keystore
 ./bin/genkeys -import principal_private.pem -keystore-key "principal-key" -public principal_public.pem
-./bin/genkeys -import client_harness_private.pem -keystore-key "client-harness-key" -public client_harness_public.pem
+./bin/genkeys -import client_private.pem -keystore-key "client-key" -public client_public.pem
+./bin/genkeys -import pentester_private.pem -keystore-key "pentester-key" -public pentester_public.pem
 
 # After importing, you can safely delete the PEM files
 ```
@@ -220,20 +231,20 @@ See the [Plugin API](#plugin-api) section below for detailed documentation on ho
 
 ### 3. Encrypt Exploit
 
-First, encrypt the exploit using the client's public key:
+Principal encrypts the exploit using the pentester's public key:
 
 ```bash
 ./bin/encrypt \
   -plugin exploit.wasm \
   -type wasm \
   -name "cve-2024-xxxx-exploit" \
-  -harness-key client_harness_public.pem \
+  -harness-key pentester_public.pem \
   -output exploit.encrypted
 ```
 
 ### 4. Principal Signs Encrypted Exploit
 
-Then, the principal signs the encrypted exploit:
+Principal signs the encrypted exploit:
 
 ```bash
 ./bin/sign \
@@ -242,34 +253,37 @@ Then, the principal signs the encrypted exploit:
   -output exploit.signed
 ```
 
-### 5. Client Verifies Exploit (Optional)
+### 5. Client Signs Execution Arguments
 
-The client can verify the signed and encrypted exploit without executing it:
+Client receives the encrypted payload and execution arguments, then signs the arguments:
 
 ```bash
-./bin/verify \
+# Client signs the execution arguments (targeting information)
+./bin/sign-args \
   -file exploit.signed \
+  -args '{"target":"192.168.1.100","port":443}' \
   -keystore-key "client-key" \
-  -president-key principal_public.pem
+  -output exploit.approved
 ```
 
 ### 6. Execute Exploit (Requires Both Authorizations)
 
-The harness verifies both authorizations and executes the exploit:
+Pentester verifies both signatures and executes the exploit:
 
 ```bash
 ./bin/harness \
-  -file exploit.signed \
-  -keystore-key "client-key" \
+  -file exploit.approved \
+  -keystore-key "pentester-key" \
   -president-key principal_public.pem \
+  -client-key client_public.pem \
   -args '{"target":"192.168.1.100","port":443}'
 ```
 
 **Note**: Execution requires:
-- ✓ Valid principal signature on exploit (verified with `principal_public.pem`)
-- ✓ Client's harness private key (from keystore `client-key`)
+- ✓ Valid principal signature on exploit payload (verified with `principal_public.pem`)
+- ✓ Valid client signature on execution arguments (verified with `client_public.pem`)
 
-Without both, execution fails cryptographically.
+Without both signatures, execution fails cryptographically. The pentester executes without prior knowledge of the exploit contents.
 
 ## OS Keystore Integration
 
@@ -310,10 +324,10 @@ Without both, execution fails cryptographically.
 All commands support keystore-based keys:
 
 ```bash
-# Encrypt an exploit
+# Principal encrypts exploit with pentester's public key
 ./bin/encrypt \
   -plugin exploit.wasm \
-  -harness-key client_harness_public.pem \
+  -harness-key pentester_public.pem \
   -output exploit.encrypted
 
 # Principal signs the encrypted exploit using keystore
@@ -322,18 +336,20 @@ All commands support keystore-based keys:
   -president-keystore-key "principal-key" \
   -output exploit.signed
 
-# Client verifies an exploit using keystore
-./bin/verify \
+# Client signs execution arguments using keystore
+./bin/sign-args \
   -file exploit.signed \
-  -keystore-key "client-harness-key" \
-  -president-key principal_public.pem
+  -args '{"target":"192.168.1.100","port":443}' \
+  -keystore-key "client-key" \
+  -output exploit.approved
 
-# Execute an exploit using keystore (requires both authorizations)
+# Pentester executes exploit using keystore (requires both authorizations)
 ./bin/harness \
-  -file exploit.signed \
-  -keystore-key "client-harness-key" \
+  -file exploit.approved \
+  -keystore-key "pentester-key" \
   -president-key principal_public.pem \
-  -args '{}'
+  -client-key client_public.pem \
+  -args '{"target":"192.168.1.100","port":443}'
 ```
 
 ### Platform Support
@@ -357,10 +373,10 @@ All commands support keystore-based keys:
 
 ### Cryptographic Flow
 
-1. **Encrypting Exploit** (Encrypt command):
+1. **Encrypting Exploit** (Principal, Encrypt command):
    - Generate symmetric key (AES-256)
    - Encrypt exploit payload with symmetric key (AES-256-GCM)
-   - Encrypt symmetric key with client's public key (ECDH)
+   - Encrypt symmetric key with pentester's public key (ECDH)
    - Create metadata and write encrypted file (without signature)
    - Store in exploit stockpile (reusable, unsigned)
 
@@ -368,14 +384,21 @@ All commands support keystore-based keys:
    - Read encrypted file from stockpile
    - Sign metadata + encrypted data with principal's private key (ECDSA)
    - Prepend signature to encrypted file
-   - Creates signed exploit ready for distribution
+   - Creates signed exploit ready for distribution to client
 
-3. **Verification & Execution** (Harness):
+3. **Signing Arguments** (Client, Sign-Args command):
+   - Client receives encrypted payload and execution arguments
+   - Client signs the execution arguments with client's private key (ECDSA)
+   - Attach client signature to payload
+   - Return signed payload to pentester
+
+4. **Verification & Execution** (Pentester, Harness):
    - Verify principal's signature on exploit payload
-   - Decrypt symmetric key with client's private key (ECDH)
+   - Verify client's signature on execution arguments
+   - Decrypt symmetric key with pentester's private key (ECDH)
    - Decrypt exploit data with symmetric key (AES-256-GCM)
-   - Load WASM module into sandbox
-   - Execute with provided arguments
+   - Load WASM module directly into sandbox (pentester never sees plaintext)
+   - Execute with client-signed arguments
 
 ### Encrypted File Format Specification
 
@@ -433,13 +456,13 @@ The symmetric key is encrypted using ECDH key exchange and AES-256-GCM:
 | `ciphertext+tag` | variable | AES-256-GCM encrypted symmetric key (32 bytes) + authentication tag (16 bytes) |
 
 **Encryption Process:**
-1. Generate ephemeral ECDSA key pair (same curve as client public key)
-2. Compute shared secret via ECDH: `shared_secret = ECDH(ephemeral_private, client_public)`
+1. Generate ephemeral ECDSA key pair (same curve as pentester public key)
+2. Compute shared secret via ECDH: `shared_secret = ECDH(ephemeral_private, pentester_public)`
 3. Derive AES-256 key: `aes_key = SHA256(shared_secret)`
 4. Encrypt symmetric key with AES-256-GCM using the derived key
 5. Prepend ephemeral public key and nonce to the ciphertext
 
-**Note**: The current implementation encrypts the symmetric key with the client's public key. In the full dual-authorization model, the client signs the execution arguments separately to approve targeting.
+**Note**: The symmetric key is encrypted with the pentester's public key, allowing the pentester to decrypt and execute. The client separately signs the execution arguments to approve targeting.
 
 #### Encrypted Exploit Data Format
 
@@ -480,7 +503,7 @@ The exploit payload is encrypted using AES-256-GCM:
 - **Integrity**: GCM authentication tags detect tampering
 - **Forward Secrecy**: Ephemeral keys used for symmetric key encryption
 - **Key Exchange**: ECDH provides secure key derivation without key material in metadata
-- **Dual Authorization**: Requires both principal signature and client key for execution
+- **Dual Authorization**: Requires both principal signature on exploit payload and client signature on execution arguments
 
 ## Plugin API
 
@@ -574,12 +597,12 @@ This interface is implemented by the WASM loader, which translates between the G
 ## Example: Using a WASM Exploit
 
 ```bash
-# Encrypt a WASM exploit
+# Principal encrypts WASM exploit with pentester's public key
 ./bin/encrypt \
   -plugin exploit.wasm \
   -type wasm \
   -name "cve-2024-xxxx-exploit" \
-  -harness-key client_harness_public.pem \
+  -harness-key pentester_public.pem \
   -output exploit.encrypted
 
 # Principal signs the encrypted exploit using keystore
@@ -588,11 +611,19 @@ This interface is implemented by the WASM loader, which translates between the G
   -president-keystore-key "principal-key" \
   -output exploit.signed
 
-# Execute it using keystore (requires both authorizations)
-./bin/harness \
+# Client signs execution arguments using keystore
+./bin/sign-args \
   -file exploit.signed \
-  -keystore-key "client-harness-key" \
+  -args '{"target":"192.168.1.100","port":443}' \
+  -keystore-key "client-key" \
+  -output exploit.approved
+
+# Pentester executes it using keystore (requires both authorizations)
+./bin/harness \
+  -file exploit.approved \
+  -keystore-key "pentester-key" \
   -president-key principal_public.pem \
+  -client-key client_public.pem \
   -args '{"target":"192.168.1.100","port":443}'
 ```
 
@@ -616,7 +647,7 @@ Harness helps penetration testing teams meet compliance requirements for:
 Harness enforces authorization boundaries by:
 
 - Requiring explicit principal approval (cryptographic signature on exploit)
-- Requiring explicit client approval (possession of harness private key for decryption)
+- Requiring explicit client approval (signature on execution arguments)
 - Preventing unauthorized modification (signature verification)
 - Maintaining chain-of-custody (cryptographic proof of approval)
 
@@ -636,5 +667,5 @@ The dual-authorization model provides liability protections by:
 - Encrypted exploits can be distributed over insecure channels
 - Signature verification ensures exploit authenticity and principal approval
 - Encryption ensures exploit confidentiality
-- Client authorization is enforced cryptographically (harness key required)
+- Client authorization is enforced cryptographically (signature on execution arguments required)
 - WASM sandboxing prevents exploits from affecting the host system
