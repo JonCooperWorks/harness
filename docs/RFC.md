@@ -52,7 +52,6 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** ar
 |----------------------|--------------------------------------------------------------|
 | Payload (P)          | The exploit binary (e.g., WASM).                             |
 | Inner Envelope       | Encrypted payload plus EO signature (not encrypted to target).|
-| (E_inner)            |                                                              |
 | Envelope (E)         | Inner envelope encrypted to target's public key (onion encryption).|
 | Approved Package (A) | Decrypted inner envelope plus Target signature, expiration, and encrypted args.|
 
