@@ -54,7 +54,7 @@ type PresidentialOrder interface {
 	// VerifyAndDecrypt verifies signatures and decrypts the payload.
 	//
 	// The ciphertextAndMetadata must be in the approved file format:
-	// [version:1][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
+	// [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
 	//
 	// Returns an error if any signature verification fails, expiration has passed,
 	// or decryption fails.
@@ -189,7 +189,7 @@ func NewPresidentialOrderFromFile(privateKeyPath string, clientPubKey *ecdsa.Pub
 //  5. Decrypts the plugin data using AES-256-GCM
 //  6. Decrypts the execution arguments using ECDH
 //
-// File format: [version:1][principal_sig_len:4][principal_sig][metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
+// File format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
 //
 // Principal signature signs: SHA256([metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data])
 //
@@ -198,7 +198,8 @@ func NewPresidentialOrderFromFile(privateKeyPath string, clientPubKey *ecdsa.Pub
 // Returns an error if any verification fails, expiration has passed, or decryption fails.
 func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedResult, error) {
 	const (
-		minFileSize     = 1 + 4 + 50 + 4 + 4 + 4 + 60 + 8 + 4 // version + principal_sig_len + min_sig + metadata_len + min_metadata + client_sig_len + min_sig + expiration + args_len
+		headerSize      = 4 + 1 + 1 + 4                                // magic + version + flags + file_length
+		minFileSize     = headerSize + 4 + 50 + 4 + 4 + 4 + 60 + 8 + 4 // header + principal_sig_len + min_sig + metadata_len + min_metadata + client_sig_len + min_sig + expiration + args_len
 		maxMetadataSize = 10000
 	)
 
@@ -208,11 +209,36 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 
 	pos := 0
 
+	// Read and validate magic bytes
+	if len(fileData) < 4 {
+		return nil, errors.New("file too short for magic bytes")
+	}
+	if string(fileData[pos:pos+4]) != "HARN" {
+		return nil, errors.New("invalid magic bytes: not a harness file")
+	}
+	pos += 4
+
 	// Read version (must be 1)
 	if fileData[pos] != 1 {
 		return nil, fmt.Errorf("unsupported file format version: %d (expected 1)", fileData[pos])
 	}
 	pos++
+
+	// Read flags (reserved for future use)
+	flags := fileData[pos]
+	pos++
+
+	// Read file length
+	if pos+4 > len(fileData) {
+		return nil, errors.New("file too short for file length")
+	}
+	fileLength := binary.BigEndian.Uint32(fileData[pos : pos+4])
+	if fileLength != 0 && fileLength != uint32(len(fileData)) {
+		return nil, fmt.Errorf("file length mismatch: header says %d bytes, but file has %d bytes", fileLength, len(fileData))
+	}
+	pos += 4
+
+	_ = flags // Reserved for future use
 
 	// Read principal signature length
 	if pos+4 > len(fileData) {

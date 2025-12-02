@@ -136,17 +136,18 @@ func main() {
 	principalPubKeyHashHex := hex.EncodeToString(principalPubKeyHash[:])
 
 	// Calculate encrypted payload hash for logging
-	// Extract encrypted payload: skip version(1) + principal_sig_len(4) + principal_sig, then read metadata_len(4) + metadata + encrypted data
-	if len(fileData) < 1+4 {
+	// Extract encrypted payload: skip header(10) + principal_sig_len(4) + principal_sig, then read metadata_len(4) + metadata + encrypted data
+	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
+	if len(fileData) < headerSize+4 {
 		fmt.Fprintf(os.Stderr, "Error: file too short\n")
 		os.Exit(1)
 	}
-	principalSigLen := int(binary.BigEndian.Uint32(fileData[1:5]))
-	if len(fileData) < 1+4+principalSigLen+4 {
+	principalSigLen := int(binary.BigEndian.Uint32(fileData[headerSize : headerSize+4]))
+	if len(fileData) < headerSize+4+principalSigLen+4 {
 		fmt.Fprintf(os.Stderr, "Error: file too short\n")
 		os.Exit(1)
 	}
-	encryptedPayloadStart := 1 + 4 + principalSigLen
+	encryptedPayloadStart := headerSize + 4 + principalSigLen
 	encryptedPayloadEnd := len(fileData) - 4 - 60 - 8 - 4 // Approximate: client_sig_len - min_sig - expiration - args_len
 	if encryptedPayloadEnd <= encryptedPayloadStart {
 		encryptedPayloadEnd = len(fileData)

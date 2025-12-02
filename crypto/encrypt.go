@@ -48,10 +48,11 @@ type EncryptPluginRequest struct {
 // EncryptPluginResult contains the encrypted plugin data and metadata.
 //
 // The EncryptedData field contains the complete encrypted file format:
-// [principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+// [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+// Note: file_length is set to 0 initially and will be updated by SignEncryptedPlugin
 type EncryptPluginResult struct {
 	// EncryptedData is the complete encrypted file format:
-	// [principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	// [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 	EncryptedData []byte
 	// PluginName is the name extracted from the plugin or provided in the request.
 	PluginName string
@@ -156,9 +157,23 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 		return nil, fmt.Errorf("failed to sign encrypted payload: %w", err)
 	}
 
-	// Build encrypted file structure with principal signature:
-	// [principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	// Build encrypted file structure with header and principal signature:
+	// [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 	var output []byte
+
+	// Write magic bytes "HARN" (0x48 0x41 0x52 0x4E)
+	output = append(output, []byte("HARN")...)
+
+	// Write version (1 byte, version 1)
+	output = append(output, byte(1))
+
+	// Write flags (1 byte, currently 0 - reserved for future use)
+	output = append(output, byte(0))
+
+	// Write file length placeholder (4 bytes, will be updated by SignEncryptedPlugin)
+	fileLengthBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(fileLengthBuf, 0) // Placeholder
+	output = append(output, fileLengthBuf...)
 
 	// Write principal signature length
 	principalSigLenBuf := make([]byte, 4)

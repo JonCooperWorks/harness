@@ -94,17 +94,18 @@ func main() {
 	}
 
 	// Extract encrypted payload hash for logging
-	// Format: [version:1][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
-	if len(result.ApprovedData) < 1+4 {
+	// Format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
+	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
+	if len(result.ApprovedData) < headerSize+4 {
 		fmt.Fprintf(os.Stderr, "Error: approved data too short\n")
 		os.Exit(1)
 	}
-	principalSigLen := int(binary.BigEndian.Uint32(result.ApprovedData[1:5]))
-	if len(result.ApprovedData) < 1+4+principalSigLen+4 {
+	principalSigLen := int(binary.BigEndian.Uint32(result.ApprovedData[headerSize : headerSize+4]))
+	if len(result.ApprovedData) < headerSize+4+principalSigLen+4 {
 		fmt.Fprintf(os.Stderr, "Error: approved data too short\n")
 		os.Exit(1)
 	}
-	encryptedPayloadStart := 1 + 4 + principalSigLen
+	encryptedPayloadStart := headerSize + 4 + principalSigLen
 	// Find end of encrypted payload (before client signature)
 	// We need to read metadata to find the exact end
 	metadataLen := int(binary.BigEndian.Uint32(result.ApprovedData[encryptedPayloadStart : encryptedPayloadStart+4]))

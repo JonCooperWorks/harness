@@ -417,14 +417,17 @@ All commands log cryptographic operations to stderr for audit trails and securit
 The encrypted exploit file format (after client signing) is:
 
 ```
-[version:1 byte][principal_sig_len:4 bytes][principal_sig][metadata_length:4 bytes][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4 bytes][client_sig][expiration:8 bytes][args_len:4 bytes][args_json]
+[magic:4 bytes][version:1 byte][flags:1 byte][file_length:4 bytes][principal_sig_len:4 bytes][principal_sig][metadata_length:4 bytes][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4 bytes][client_sig][expiration:8 bytes][args_len:4 bytes][encrypted_args]
 ```
 
 #### File Layout
 
 | Field | Size | Description |
 |-------|------|-------------|
+| `magic` | 4 bytes | Magic bytes identifier: `0x48 0x41 0x52 0x4E` ("HARN") for file type detection |
 | `version` | 1 byte | Format version (must be 1). Includes principal signature and encrypted payload hash in signatures. |
+| `flags` | 1 byte | Reserved flags byte (currently 0, reserved for future use) |
+| `file_length` | 4 bytes | Big-endian uint32: total file size in bytes (set to 0 in encrypted files, updated by sign command) |
 | `principal_sig_len` | 4 bytes | Big-endian uint32: length of principal signature in bytes |
 | `principal_sig` | variable | ASN.1 DER-encoded ECDSA signature (R, S values) signing the encrypted payload hash |
 | `metadata_length` | 4 bytes | Big-endian uint32: length of metadata JSON in bytes |
@@ -535,6 +538,8 @@ The exploit payload is encrypted using AES-256-GCM:
 - **Deterministic Parsing**: File format uses explicit deterministic forward parsing (no heuristics)
 - **Metadata Limits**: Hard limit of 10KB enforced on metadata size
 - **Dual Authorization**: Requires principal encryption + client signature
+- **File Type Detection**: Magic bytes ("HARN") enable quick file type identification
+- **File Length Validation**: Total file length field enables early validation of file completeness
 
 ## Plugin API
 

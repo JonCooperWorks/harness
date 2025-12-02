@@ -16,13 +16,13 @@ import (
 	"github.com/joncooperworks/harness/crypto/keystore"
 )
 
-// SignEncryptedPluginRequest contains all the information needed to sign an encrypted plugin.
+	// SignEncryptedPluginRequest contains all the information needed to sign an encrypted plugin.
 //
 // This request implements the client's role in the dual-authorization model:
 // signing execution arguments and expiration to approve exploit execution.
 type SignEncryptedPluginRequest struct {
 	// EncryptedData is the encrypted plugin data (from EncryptPlugin).
-	// Format: [principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	// Format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 	// The data is read from this io.Reader, making it suitable for streaming from S3, Lambda, etc.
 	EncryptedData io.Reader
 	// ArgsJSON is the JSON arguments to sign and encrypt.
@@ -47,10 +47,10 @@ type SignEncryptedPluginRequest struct {
 // SignEncryptedPluginResult contains the signed and approved plugin data.
 //
 // The ApprovedData field contains the complete approved file format:
-// [version:1][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
+// [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
 type SignEncryptedPluginResult struct {
 	// ApprovedData is the complete approved file format:
-	// [version:1][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
+	// [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
 	ApprovedData []byte
 	// ExpirationTime is when the signature expires.
 	// Execution will fail if attempted after this time.
@@ -117,17 +117,29 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	}
 	expirationUnix := expirationTime.Unix()
 
+	// Validate magic bytes and version
+	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
+	if len(encryptedData) < headerSize {
+		return nil, errors.New("encrypted data too short for header")
+	}
+	if string(encryptedData[0:4]) != "HARN" {
+		return nil, errors.New("invalid magic bytes: not a harness file")
+	}
+	if encryptedData[4] != 1 {
+		return nil, fmt.Errorf("unsupported file format version: %d (expected 1)", encryptedData[4])
+	}
+
 	// Extract encrypted payload for hashing (everything after principal signature)
 	// Encrypted payload = [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
-	// Skip principal_sig_len (4 bytes) and principal_sig (variable)
-	if len(encryptedData) < 4 {
+	// Skip header (10 bytes) + principal_sig_len (4 bytes) + principal_sig (variable)
+	if len(encryptedData) < headerSize+4 {
 		return nil, errors.New("encrypted data too short")
 	}
-	principalSigLen := int(binary.BigEndian.Uint32(encryptedData[0:4]))
-	if len(encryptedData) < 4+principalSigLen {
+	principalSigLen := int(binary.BigEndian.Uint32(encryptedData[headerSize : headerSize+4]))
+	if len(encryptedData) < headerSize+4+principalSigLen {
 		return nil, errors.New("encrypted data too short for principal signature")
 	}
-	encryptedPayload := encryptedData[4+principalSigLen:]
+	encryptedPayload := encryptedData[headerSize+4+principalSigLen:]
 
 	// Hash the encrypted payload to include in signature
 	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
@@ -146,13 +158,10 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	}
 
 	// Build final approved file structure:
-	// [version:1][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
+	// [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
 	var output []byte
 
-	// Write version (1 byte, version 1)
-	output = append(output, byte(1))
-
-	// Write encrypted payload (already in correct format)
+	// Write header (magic, version, flags) and encrypted payload (already in correct format)
 	output = append(output, encryptedData...)
 
 	// Write client signature length
@@ -175,6 +184,11 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 
 	// Write encrypted args
 	output = append(output, encryptedArgs...)
+
+	// Update file length field (at offset 6, after magic:4 + version:1 + flags:1)
+	fileLengthBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(fileLengthBuf, uint32(len(output)))
+	copy(output[6:10], fileLengthBuf)
 
 	return &SignEncryptedPluginResult{
 		ApprovedData:   output,

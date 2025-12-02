@@ -105,16 +105,18 @@ func main() {
 
 	// Calculate hash of principal signature for logging
 	// Extract principal signature from encrypted data
-	if len(result.EncryptedData) < 4 {
+	// Format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig]...
+	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
+	if len(result.EncryptedData) < headerSize+4 {
 		fmt.Fprintf(os.Stderr, "Error: encrypted data too short\n")
 		os.Exit(1)
 	}
-	principalSigLen := int(binary.BigEndian.Uint32(result.EncryptedData[0:4]))
-	if len(result.EncryptedData) < 4+principalSigLen {
+	principalSigLen := int(binary.BigEndian.Uint32(result.EncryptedData[headerSize : headerSize+4]))
+	if len(result.EncryptedData) < headerSize+4+principalSigLen {
 		fmt.Fprintf(os.Stderr, "Error: encrypted data too short for principal signature\n")
 		os.Exit(1)
 	}
-	principalSignature := result.EncryptedData[4 : 4+principalSigLen]
+	principalSignature := result.EncryptedData[headerSize+4 : headerSize+4+principalSigLen]
 	principalSigHash := sha256.Sum256(principalSignature)
 	principalSigHashHex := hex.EncodeToString(principalSigHash[:])
 
