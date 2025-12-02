@@ -6,15 +6,12 @@ package keystore
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/hkdf"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
-	"math/big"
 
 	"github.com/99designs/keyring"
 )
@@ -40,8 +37,8 @@ func NewKeyringKeystore() (Keystore, error) {
 	return &KeyringKeystore{ring: ring}, nil
 }
 
-// GetPrivateKey retrieves an ECDSA private key from Linux keyring
-func (k *KeyringKeystore) GetPrivateKey(keyID string) (*ecdsa.PrivateKey, error) {
+// GetPrivateKey retrieves an Ed25519 private key from Linux keyring
+func (k *KeyringKeystore) GetPrivateKey(keyID string) (ed25519.PrivateKey, error) {
 	item, err := k.ring.Get(keyID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get key from keyring: %w", err)
@@ -56,23 +53,22 @@ func (k *KeyringKeystore) GetPrivateKey(keyID string) (*ecdsa.PrivateKey, error)
 	// Try PKCS8 format
 	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err == nil {
-		if ecdsaKey, ok := key.(*ecdsa.PrivateKey); ok {
-			return ecdsaKey, nil
+		if ed25519Key, ok := key.(ed25519.PrivateKey); ok {
+			return ed25519Key, nil
 		}
-		return nil, fmt.Errorf("key is not ECDSA")
+		return nil, fmt.Errorf("key is not Ed25519")
 	}
 
-	// Try EC private key format
-	ecKey, err := x509.ParseECPrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key: %w", err)
+	// Try raw Ed25519 private key (64 bytes)
+	if len(block.Bytes) == ed25519.PrivateKeySize {
+		return ed25519.PrivateKey(block.Bytes), nil
 	}
 
-	return ecKey, nil
+	return nil, fmt.Errorf("failed to parse private key: unsupported format")
 }
 
-// SetPrivateKey stores an ECDSA private key in Linux keyring
-func (k *KeyringKeystore) SetPrivateKey(keyID string, privateKey *ecdsa.PrivateKey) error {
+// SetPrivateKey stores an Ed25519 private key in Linux keyring
+func (k *KeyringKeystore) SetPrivateKey(keyID string, privateKey ed25519.PrivateKey) error {
 	// Encode private key to PEM format (PKCS8)
 	privateKeyBytes, err := x509.MarshalPKCS8PrivateKey(privateKey)
 	if err != nil {
@@ -97,12 +93,12 @@ func (k *KeyringKeystore) SetPrivateKey(keyID string, privateKey *ecdsa.PrivateK
 }
 
 // GetPublicKey retrieves the public key associated with a key ID
-func (k *KeyringKeystore) GetPublicKey(keyID string) (*ecdsa.PublicKey, error) {
+func (k *KeyringKeystore) GetPublicKey(keyID string) (ed25519.PublicKey, error) {
 	privateKey, err := k.GetPrivateKey(keyID)
 	if err != nil {
 		return nil, err
 	}
-	return &privateKey.PublicKey, nil
+	return privateKey.Public().(ed25519.PublicKey), nil
 }
 
 // Sign signs the provided data hash using the private key associated with keyID
@@ -112,24 +108,14 @@ func (k *KeyringKeystore) Sign(keyID string, hash []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	r, s, err := ecdsa.Sign(rand.Reader, privateKey, hash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign: %w", err)
-	}
-
-	signature, err := asn1.Marshal(struct {
-		R, S *big.Int
-	}{R: r, S: s})
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal signature: %w", err)
-	}
-
+	// Ed25519.Sign returns a 64-byte signature
+	signature := ed25519.Sign(privateKey, hash)
 	return signature, nil
 }
 
-// DecryptWithContext decrypts data encrypted via ECDH with a specific HKDF context
+// DecryptWithContext decrypts data encrypted via X25519 with a specific HKDF context
 func (k *KeyringKeystore) DecryptWithContext(keyID string, encryptedKey []byte, context string) ([]byte, error) {
-	if len(encryptedKey) < 65 {
+	if len(encryptedKey) < 32 {
 		return nil, fmt.Errorf("encrypted key too short")
 	}
 
@@ -138,26 +124,20 @@ func (k *KeyringKeystore) DecryptWithContext(keyID string, encryptedKey []byte, 
 		return nil, err
 	}
 
-	// Extract ephemeral public key (uncompressed format: 0x04 || x || y)
-	pubKeyBytes := encryptedKey[:65]
-	x := new(big.Int).SetBytes(pubKeyBytes[1:33])
-	y := new(big.Int).SetBytes(pubKeyBytes[33:65])
+	// Extract ephemeral X25519 public key (32 bytes)
+	ephemeralX25519PubKey := encryptedKey[:32]
 
-	// Create public key from point
-	ephemeralPubKey := &ecdsa.PublicKey{
-		Curve: privateKey.Curve,
-		X:     x,
-		Y:     y,
+	// Convert Ed25519 private key to X25519
+	x25519PrivateKey, err := Ed25519ToX25519PrivateKey(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert private key to X25519: %w", err)
 	}
 
-	// Validate ephemeral public key
-	if err := validatePublicKey(ephemeralPubKey); err != nil {
-		return nil, fmt.Errorf("invalid ephemeral public key: %w", err)
+	// Compute shared secret using X25519
+	sharedSecret, err := x25519SharedSecret(x25519PrivateKey, ephemeralX25519PubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute shared secret: %w", err)
 	}
-
-	// Compute shared secret using ECDH
-	sharedX, _ := ephemeralPubKey.Curve.ScalarMult(ephemeralPubKey.X, ephemeralPubKey.Y, privateKey.D.Bytes())
-	sharedSecret := sharedX.Bytes()
 
 	// Derive AES key from shared secret using HKDF with specified context
 	aesKey, err := deriveKey(sharedSecret, context)
@@ -166,7 +146,7 @@ func (k *KeyringKeystore) DecryptWithContext(keyID string, encryptedKey []byte, 
 	}
 
 	// Decrypt the data
-	encryptedData := encryptedKey[65:]
+	encryptedData := encryptedKey[32:]
 	if len(encryptedData) < 12+16 {
 		return nil, fmt.Errorf("encrypted data too short")
 	}
@@ -195,22 +175,6 @@ func (k *KeyringKeystore) DecryptWithContext(keyID string, encryptedKey []byte, 
 	return plaintext, nil
 }
 
-// validatePublicKey validates that a public key point is on the curve and not at infinity
-func validatePublicKey(pubKey *ecdsa.PublicKey) error {
-	if pubKey == nil {
-		return fmt.Errorf("public key cannot be nil")
-	}
-	if pubKey.Curve == nil {
-		return fmt.Errorf("public key curve cannot be nil")
-	}
-	if pubKey.X == nil || pubKey.Y == nil {
-		return fmt.Errorf("public key point coordinates cannot be nil")
-	}
-	if !pubKey.Curve.IsOnCurve(pubKey.X, pubKey.Y) {
-		return fmt.Errorf("public key point is not on the curve")
-	}
-	return nil
-}
 
 // padSharedSecret pads a shared secret to exactly 32 bytes for consistent key derivation
 func padSharedSecret(secret []byte) []byte {

@@ -1,8 +1,7 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
@@ -29,7 +28,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	var privateKey *ecdsa.PrivateKey
+	var privateKey ed25519.PrivateKey
 	var err error
 
 	if *importKeyPath != "" {
@@ -40,8 +39,8 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		// Generate new ECDSA key pair
-		privateKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		// Generate new Ed25519 key pair
+		_, privateKey, err = ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			logger.Error("failed to generate key", "error", err)
 			os.Exit(1)
@@ -61,7 +60,8 @@ func main() {
 	}
 
 	// Encode and write public key only
-	publicKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	publicKeyBytes, err := x509.MarshalPKIXPublicKey(publicKey)
 	if err != nil {
 		logger.Error("failed to marshal public key", "error", err)
 		os.Exit(1)
@@ -90,8 +90,8 @@ func main() {
 	}
 }
 
-// loadPrivateKey loads an ECDSA private key from a file
-func loadPrivateKey(path string) (*ecdsa.PrivateKey, error) {
+// loadPrivateKey loads an Ed25519 private key from a file
+func loadPrivateKey(path string) (ed25519.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read private key file: %w", err)
@@ -106,17 +106,16 @@ func loadPrivateKey(path string) (*ecdsa.PrivateKey, error) {
 	// Try PKCS8 format
 	key, err := x509.ParsePKCS8PrivateKey(data)
 	if err == nil {
-		if ecdsaKey, ok := key.(*ecdsa.PrivateKey); ok {
-			return ecdsaKey, nil
+		if ed25519Key, ok := key.(ed25519.PrivateKey); ok {
+			return ed25519Key, nil
 		}
-		return nil, fmt.Errorf("key is not ECDSA")
+		return nil, fmt.Errorf("key is not Ed25519")
 	}
 
-	// Try EC private key format
-	ecKey, err := x509.ParseECPrivateKey(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key: %w", err)
+	// Try raw Ed25519 private key (64 bytes)
+	if len(data) == ed25519.PrivateKeySize {
+		return ed25519.PrivateKey(data), nil
 	}
 
-	return ecKey, nil
+	return nil, fmt.Errorf("failed to parse private key: unsupported format")
 }

@@ -3,7 +3,7 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/joncooperworks/harness/crypto/keystore"
+	"golang.org/x/crypto/curve25519"
 )
 
 // SignEncryptedPluginRequest contains all the information needed to sign an encrypted plugin.
@@ -36,8 +37,8 @@ type SignEncryptedPluginRequest struct {
 	// This key is used to sign the approval of execution arguments and expiration.
 	ClientKeyID string
 	// PentesterPubKey is the pentester's public key for encrypting arguments.
-	// Arguments are encrypted using ECDH key exchange with this public key.
-	PentesterPubKey *ecdsa.PublicKey
+	// Arguments are encrypted using X25519 key exchange with this public key.
+	PentesterPubKey ed25519.PublicKey
 	// Expiration is when the signature expires.
 	// Defaults to 72 hours from now if nil.
 	// The expiration is included in the signature, preventing execution after expiry.
@@ -196,30 +197,35 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	}, nil
 }
 
-// encryptArgs encrypts arguments using ECDH + AES-256-GCM (same method as encryptSymmetricKey)
-func encryptArgs(plaintext []byte, publicKey *ecdsa.PublicKey) ([]byte, error) {
-	// Validate public key
-	if err := validatePublicKey(publicKey); err != nil {
-		return nil, fmt.Errorf("invalid public key: %w", err)
+// encryptArgs encrypts arguments using X25519 + AES-256-GCM (same method as encryptSymmetricKey)
+func encryptArgs(plaintext []byte, publicKey ed25519.PublicKey) ([]byte, error) {
+	if len(publicKey) != ed25519.PublicKeySize {
+		return nil, errors.New("invalid public key size")
 	}
 
-	// Generate ephemeral key pair for ECDH
-	ephemeralPrivate, err := ecdsa.GenerateKey(publicKey.Curve, rand.Reader)
+	// Generate ephemeral Ed25519 key pair
+	ephemeralPublic, ephemeralPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate ephemeral key: %w", err)
 	}
 
-	// Validate ephemeral public key
-	if err := validatePublicKey(&ephemeralPrivate.PublicKey); err != nil {
-		return nil, fmt.Errorf("invalid ephemeral public key: %w", err)
+	// Convert Ed25519 keys to X25519 for key exchange
+	ephemeralX25519Private, err := keystore.Ed25519ToX25519PrivateKey(ephemeralPrivate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert ephemeral private key to X25519: %w", err)
 	}
 
-	// Compute shared secret using ECDH
-	sharedX, _ := publicKey.Curve.ScalarMult(publicKey.X, publicKey.Y, ephemeralPrivate.D.Bytes())
-	sharedSecret := sharedX.Bytes()
+	pentesterX25519Public, err := keystore.Ed25519ToX25519PublicKey(publicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert pentester public key to X25519: %w", err)
+	}
+
+	// Compute shared secret using X25519
+	var sharedSecret [32]byte
+	curve25519.ScalarMult(&sharedSecret, (*[32]byte)(ephemeralX25519Private), (*[32]byte)(pentesterX25519Public))
 
 	// Derive AES key from shared secret using HKDF
-	aesKey, err := deriveKey(sharedSecret, "harness-args-v1")
+	aesKey, err := deriveKey(sharedSecret[:], "harness-args-v1")
 	if err != nil {
 		return nil, fmt.Errorf("failed to derive key: %w", err)
 	}
@@ -243,15 +249,15 @@ func encryptArgs(plaintext []byte, publicKey *ecdsa.PublicKey) ([]byte, error) {
 
 	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
 
-	// Build result: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
-	result := make([]byte, 0, 65+12+len(ciphertext))
+	// Build result: [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
+	result := make([]byte, 0, 32+12+len(ciphertext))
 
-	// Encode ephemeral public key (uncompressed: 0x04 || x || y)
-	ephemeralPubBytes := make([]byte, 65)
-	ephemeralPubBytes[0] = 0x04
-	copy(ephemeralPubBytes[1:33], ephemeralPrivate.PublicKey.X.Bytes())
-	copy(ephemeralPubBytes[33:65], ephemeralPrivate.PublicKey.Y.Bytes())
-	result = append(result, ephemeralPubBytes...)
+	// Encode ephemeral X25519 public key (32 bytes)
+	ephemeralX25519PubBytes, err := keystore.Ed25519ToX25519PublicKey(ephemeralPublic)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert ephemeral public key to X25519: %w", err)
+	}
+	result = append(result, ephemeralX25519PubBytes...)
 
 	// Append nonce
 	result = append(result, nonce...)

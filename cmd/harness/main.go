@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/binary"
@@ -205,8 +205,8 @@ func main() {
 	fmt.Println(string(resultJSON))
 }
 
-// loadPublicKey loads an ECDSA public key from a file
-func loadPublicKey(path string) (*ecdsa.PublicKey, error) {
+// loadPublicKey loads an Ed25519 public key from a file
+func loadPublicKey(path string) (ed25519.PublicKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read public key file: %w", err)
@@ -224,10 +224,10 @@ func loadPublicKey(path string) (*ecdsa.PublicKey, error) {
 		return nil, fmt.Errorf("failed to parse public key: %w", err)
 	}
 
-	ecdsaPubKey, ok := pubKey.(*ecdsa.PublicKey)
+	ed25519PubKey, ok := pubKey.(ed25519.PublicKey)
 	if !ok {
-		return nil, fmt.Errorf("public key is not ECDSA")
+		return nil, fmt.Errorf("public key is not Ed25519")
 	}
 
-	return ecdsaPubKey, nil
+	return ed25519PubKey, nil
 }

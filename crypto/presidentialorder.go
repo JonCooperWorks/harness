@@ -3,21 +3,20 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/hkdf"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/asn1"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"math/big"
 	"os"
 	"time"
 
 	"github.com/joncooperworks/harness/crypto/keystore"
+	"golang.org/x/crypto/curve25519"
 )
 
 // DecryptedResult contains both the decrypted payload and the execution arguments.
@@ -63,9 +62,9 @@ type PresidentialOrder interface {
 
 // PresidentialOrderImpl implements the PresidentialOrder interface
 type PresidentialOrderImpl struct {
-	privateKey      *ecdsa.PrivateKey // Pentester's private key (for decryption) - DEPRECATED: use keystore instead
-	clientPubKey    *ecdsa.PublicKey  // Client's public key (for verifying argument signature)
-	principalPubKey *ecdsa.PublicKey  // Principal's public key (for verifying payload signature)
+	privateKey      ed25519.PrivateKey // Pentester's private key (for decryption) - DEPRECATED: use keystore instead
+	clientPubKey    ed25519.PublicKey  // Client's public key (for verifying argument signature)
+	principalPubKey ed25519.PublicKey  // Principal's public key (for verifying payload signature)
 	keystore        keystore.Keystore
 	keystoreKeyID   string
 }
@@ -78,12 +77,12 @@ type PresidentialOrderImpl struct {
 // This function creates a PresidentialOrder using an in-memory private key.
 // The privateKey is the pentester's private key for decryption.
 // The clientPubKey is the client's public key for verifying argument signatures.
-func NewPresidentialOrderFromKeys(privateKey *ecdsa.PrivateKey, clientPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
-	if privateKey == nil {
-		return nil, errors.New("private key cannot be nil")
+func NewPresidentialOrderFromKeys(privateKey ed25519.PrivateKey, clientPubKey ed25519.PublicKey) (PresidentialOrder, error) {
+	if len(privateKey) == 0 {
+		return nil, errors.New("private key cannot be empty")
 	}
-	if clientPubKey == nil {
-		return nil, errors.New("client public key cannot be nil")
+	if len(clientPubKey) == 0 {
+		return nil, errors.New("client public key cannot be empty")
 	}
 	return &PresidentialOrderImpl{
 		privateKey:   privateKey,
@@ -102,8 +101,10 @@ func NewPresidentialOrderFromKeys(privateKey *ecdsa.PrivateKey, clientPubKey *ec
 //
 // Note: This function does not include principal signature verification.
 // Use NewPresidentialOrderFromKeystoreWithPrincipal for full security.
-func NewPresidentialOrderFromKeystore(keystoreKeyID string, clientPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
-	return NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID, clientPubKey, nil)
+func NewPresidentialOrderFromKeystore(keystoreKeyID string, clientPubKey ed25519.PublicKey) (PresidentialOrder, error) {
+	// Create a zero-value principal key (will fail verification if used)
+	var zeroPrincipalKey ed25519.PublicKey
+	return NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID, clientPubKey, zeroPrincipalKey)
 }
 
 // NewPresidentialOrderFromKeystoreWithPrincipal creates a new PresidentialOrder with principal public key.
@@ -118,15 +119,15 @@ func NewPresidentialOrderFromKeystore(keystoreKeyID string, clientPubKey *ecdsa.
 //
 // The private key never leaves secure storage - all decryption operations happen
 // through the keystore interface, allowing hardware-backed or cloud-based key storage.
-func NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID string, clientPubKey *ecdsa.PublicKey, principalPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
+func NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID string, clientPubKey ed25519.PublicKey, principalPubKey ed25519.PublicKey) (PresidentialOrder, error) {
 	if keystoreKeyID == "" {
 		return nil, errors.New("keystore key ID cannot be empty")
 	}
-	if clientPubKey == nil {
-		return nil, errors.New("client public key cannot be nil")
+	if len(clientPubKey) == 0 {
+		return nil, errors.New("client public key cannot be empty")
 	}
-	if principalPubKey == nil {
-		return nil, errors.New("principal public key cannot be nil")
+	if len(principalPubKey) == 0 {
+		return nil, errors.New("principal public key cannot be empty")
 	}
 
 	ks, err := keystore.NewKeystore()
@@ -155,12 +156,12 @@ func NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID string, clientP
 //
 // Security Warning: Loading private keys from files exposes them to the filesystem
 // and process memory. Use OS keystore integration instead.
-func NewPresidentialOrderFromFile(privateKeyPath string, clientPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
+func NewPresidentialOrderFromFile(privateKeyPath string, clientPubKey ed25519.PublicKey) (PresidentialOrder, error) {
 	if privateKeyPath == "" {
 		return nil, errors.New("private key path cannot be empty")
 	}
-	if clientPubKey == nil {
-		return nil, errors.New("client public key cannot be nil")
+	if len(clientPubKey) == 0 {
+		return nil, errors.New("client public key cannot be empty")
 	}
 
 	keyData, err := os.ReadFile(privateKeyPath)
@@ -245,8 +246,8 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, errors.New("file too short for principal signature length")
 	}
 	principalSigLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
-	if principalSigLen < 50 || principalSigLen > 120 {
-		return nil, fmt.Errorf("invalid principal signature length: %d (expected 50-120 bytes)", principalSigLen)
+	if principalSigLen != 64 {
+		return nil, fmt.Errorf("invalid principal signature length: %d (expected 64 bytes for Ed25519)", principalSigLen)
 	}
 	pos += 4
 
@@ -298,13 +299,7 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
 
 	// Verify principal signature BEFORE decryption (signs encrypted payload hash)
-	var principalSig struct {
-		R, S *big.Int
-	}
-	if _, err := asn1.Unmarshal(principalSignature, &principalSig); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal principal signature: %w", err)
-	}
-	if !ecdsa.Verify(po.principalPubKey, encryptedPayloadHash[:], principalSig.R, principalSig.S) {
+	if !ed25519.Verify(po.principalPubKey, encryptedPayloadHash[:], principalSignature) {
 		return nil, errors.New("principal signature verification failed (signature must cover encrypted payload hash)")
 	}
 
@@ -327,8 +322,8 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, errors.New("file too short for client signature length")
 	}
 	clientSigLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
-	if clientSigLen < 60 || clientSigLen > 80 {
-		return nil, fmt.Errorf("invalid client signature length: %d (expected 60-80 bytes)", clientSigLen)
+	if clientSigLen != 64 {
+		return nil, fmt.Errorf("invalid client signature length: %d (expected 64 bytes for Ed25519)", clientSigLen)
 	}
 	pos += 4
 
@@ -379,13 +374,7 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	copy(dataToVerify[40:], encryptedArgs)
 
 	dataHash := sha256.Sum256(dataToVerify)
-	var clientSig struct {
-		R, S *big.Int
-	}
-	if _, err := asn1.Unmarshal(clientSignature, &clientSig); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal client signature: %w", err)
-	}
-	if !ecdsa.Verify(po.clientPubKey, dataHash[:], clientSig.R, clientSig.S) {
+	if !ed25519.Verify(po.clientPubKey, dataHash[:], clientSignature) {
 		return nil, errors.New("client signature verification failed (signature must cover encrypted payload hash, expiration, and arguments)")
 	}
 
@@ -447,54 +436,46 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 }
 
 // decryptArgs decrypts arguments using keystore (keys never leave secure storage)
-// The encrypted args format is: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
+// The encrypted args format is: [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
 // Uses context "harness-args-v1" for key derivation (different from symmetric keys)
 func (po *PresidentialOrderImpl) decryptArgs(encryptedArgs []byte) ([]byte, error) {
-	if len(encryptedArgs) < 65+12+16 { // Need at least ephemeral key + nonce + tag
+	if len(encryptedArgs) < 32+12+16 { // Need at least ephemeral key + nonce + tag
 		return nil, errors.New("encrypted args too short")
 	}
 
 	// Use keystore to decrypt with args-specific context
-	// DecryptWithContext expects format: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
+	// DecryptWithContext expects format: [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
 	// which matches our encryptedArgs format
 	return po.keystore.DecryptWithContext(po.keystoreKeyID, encryptedArgs, "harness-args-v1")
 }
 
 // decryptArgsWithKey decrypts arguments using in-memory private key (deprecated)
-func (po *PresidentialOrderImpl) decryptArgsWithKey(encryptedArgs []byte, privateKey *ecdsa.PrivateKey) ([]byte, error) {
-	if len(encryptedArgs) < 65+12+16 { // Need at least ephemeral key + nonce + tag
+func (po *PresidentialOrderImpl) decryptArgsWithKey(encryptedArgs []byte, privateKey ed25519.PrivateKey) ([]byte, error) {
+	if len(encryptedArgs) < 32+12+16 { // Need at least ephemeral key + nonce + tag
 		return nil, errors.New("encrypted args too short")
 	}
 
-	// Extract ephemeral public key (uncompressed format: 0x04 || x || y)
-	ephemeralPubKeyBytes := encryptedArgs[:65]
-	x := new(big.Int).SetBytes(ephemeralPubKeyBytes[1:33])
-	y := new(big.Int).SetBytes(ephemeralPubKeyBytes[33:65])
+	// Extract ephemeral X25519 public key (32 bytes)
+	ephemeralX25519PubKey := encryptedArgs[:32]
 
-	// Create ephemeral public key from point
-	ephemeralPubKey := &ecdsa.PublicKey{
-		Curve: privateKey.Curve,
-		X:     x,
-		Y:     y,
+	// Convert Ed25519 private key to X25519
+	x25519PrivateKey, err := keystore.Ed25519ToX25519PrivateKey(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert private key to X25519: %w", err)
 	}
 
-	// Validate ephemeral public key
-	if err := validatePublicKey(ephemeralPubKey); err != nil {
-		return nil, fmt.Errorf("invalid ephemeral public key: %w", err)
-	}
-
-	// Compute shared secret using ECDH
-	sharedX, _ := ephemeralPubKey.Curve.ScalarMult(ephemeralPubKey.X, ephemeralPubKey.Y, privateKey.D.Bytes())
-	sharedSecret := sharedX.Bytes()
+	// Compute shared secret using X25519
+	var sharedSecret [32]byte
+	curve25519.ScalarMult(&sharedSecret, (*[32]byte)(x25519PrivateKey), (*[32]byte)(ephemeralX25519PubKey))
 
 	// Derive AES key from shared secret using HKDF
-	aesKey, err := deriveKey(sharedSecret, "harness-args-v1")
+	aesKey, err := deriveKey(sharedSecret[:], "harness-args-v1")
 	if err != nil {
 		return nil, fmt.Errorf("failed to derive key: %w", err)
 	}
 
 	// Extract nonce and ciphertext
-	encryptedData := encryptedArgs[65:]
+	encryptedData := encryptedArgs[32:]
 	if len(encryptedData) < 12+16 { // Need at least nonce (12) + tag (16)
 		return nil, errors.New("encrypted args data too short")
 	}
@@ -522,44 +503,35 @@ func (po *PresidentialOrderImpl) decryptArgsWithKey(encryptedArgs []byte, privat
 	return plaintext, nil
 }
 
-// decryptSymmetricKey decrypts the symmetric key using ECDSA key exchange
+// decryptSymmetricKey decrypts the symmetric key using X25519 key exchange
 func (po *PresidentialOrderImpl) decryptSymmetricKey(encryptedKey []byte) ([]byte, error) {
-	// For ECDSA key exchange, we use ECDH (Elliptic Curve Diffie-Hellman)
-	// The encrypted key contains the public key point and the encrypted symmetric key
+	// For X25519 key exchange, the encrypted key contains the X25519 public key and the encrypted symmetric key
 
-	if len(encryptedKey) < 65 { // 1 byte prefix + 32 bytes x + 32 bytes y
+	if len(encryptedKey) < 32 { // 32 bytes X25519 public key
 		return nil, errors.New("encrypted key too short")
 	}
 
-	// Extract public key point (uncompressed format: 0x04 || x || y)
-	pubKeyBytes := encryptedKey[:65]
-	x := new(big.Int).SetBytes(pubKeyBytes[1:33])
-	y := new(big.Int).SetBytes(pubKeyBytes[33:65])
+	// Extract ephemeral X25519 public key (32 bytes)
+	ephemeralX25519PubKey := encryptedKey[:32]
 
-	// Create public key from point
-	pubKey := &ecdsa.PublicKey{
-		Curve: po.privateKey.Curve,
-		X:     x,
-		Y:     y,
+	// Convert Ed25519 private key to X25519
+	x25519PrivateKey, err := keystore.Ed25519ToX25519PrivateKey(po.privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert private key to X25519: %w", err)
 	}
 
-	// Validate ephemeral public key
-	if err := validatePublicKey(pubKey); err != nil {
-		return nil, fmt.Errorf("invalid ephemeral public key: %w", err)
-	}
-
-	// Compute shared secret using ECDH
-	sharedX, _ := pubKey.Curve.ScalarMult(pubKey.X, pubKey.Y, po.privateKey.D.Bytes())
-	sharedSecret := sharedX.Bytes()
+	// Compute shared secret using X25519
+	var sharedSecret [32]byte
+	curve25519.ScalarMult(&sharedSecret, (*[32]byte)(x25519PrivateKey), (*[32]byte)(ephemeralX25519PubKey))
 
 	// Derive AES key from shared secret using HKDF
-	aesKey, err := deriveKey(sharedSecret, "harness-symmetric-key-v1")
+	aesKey, err := deriveKey(sharedSecret[:], "harness-symmetric-key-v1")
 	if err != nil {
 		return nil, fmt.Errorf("failed to derive key: %w", err)
 	}
 
 	// Decrypt the symmetric key
-	encryptedSymmetricKey := encryptedKey[65:]
+	encryptedSymmetricKey := encryptedKey[32:]
 	if len(encryptedSymmetricKey) < 12+16 { // Need at least nonce (12) + tag (16)
 		return nil, errors.New("encrypted symmetric key too short")
 	}
@@ -623,7 +595,7 @@ func decryptAES(ciphertext, key []byte) ([]byte, error) {
 }
 
 // parsePrivateKey parses a private key from various formats
-func parsePrivateKey(keyData []byte) (*ecdsa.PrivateKey, error) {
+func parsePrivateKey(keyData []byte) (ed25519.PrivateKey, error) {
 	// Try PEM format first
 	block, _ := pem.Decode(keyData)
 	if block != nil {
@@ -633,38 +605,18 @@ func parsePrivateKey(keyData []byte) (*ecdsa.PrivateKey, error) {
 	// Try PKCS8 format
 	key, err := x509.ParsePKCS8PrivateKey(keyData)
 	if err == nil {
-		if ecdsaKey, ok := key.(*ecdsa.PrivateKey); ok {
-			return ecdsaKey, nil
+		if ed25519Key, ok := key.(ed25519.PrivateKey); ok {
+			return ed25519Key, nil
 		}
-		return nil, errors.New("key is not ECDSA")
+		return nil, errors.New("key is not Ed25519")
 	}
 
-	// Try EC private key format
-	ecKey, err := x509.ParseECPrivateKey(keyData)
-	if err == nil {
-		return ecKey, nil
+	// Try raw Ed25519 private key (64 bytes)
+	if len(keyData) == ed25519.PrivateKeySize {
+		return ed25519.PrivateKey(keyData), nil
 	}
 
 	return nil, errors.New("failed to parse private key: unsupported format")
-}
-
-// validatePublicKey validates that a public key point is on the curve and not at infinity
-func validatePublicKey(pubKey *ecdsa.PublicKey) error {
-	if pubKey == nil {
-		return errors.New("public key cannot be nil")
-	}
-	if pubKey.Curve == nil {
-		return errors.New("public key curve cannot be nil")
-	}
-	// Check if point is at infinity (both coordinates are zero or invalid)
-	if pubKey.X == nil || pubKey.Y == nil {
-		return errors.New("public key point coordinates cannot be nil")
-	}
-	// Check if point is on the curve
-	if !pubKey.Curve.IsOnCurve(pubKey.X, pubKey.Y) {
-		return errors.New("public key point is not on the curve")
-	}
-	return nil
 }
 
 // padSharedSecret pads a shared secret to exactly 32 bytes for consistent key derivation
