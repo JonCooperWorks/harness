@@ -177,10 +177,11 @@ The registry is thread-safe and implementations register themselves automaticall
 
 - **Cryptographic Security**: ECDSA signatures, AES-256-GCM encryption
 - **Cross-Platform**: macOS, Linux, Windows
-- **WASM Sandboxing**: Execution isolation via Extism SDK (provides security boundaries, not perfect isolation)
+- **WASM Sandboxing**: Execution isolation via [Extism SDK](https://extism.org/) (provides security boundaries, not perfect isolation)
 - **OS Keystore Integration**: Private keys never written to disk
 - **Memory-Based Loading**: Exploits loaded directly from memory
 - **Dual-Authorization**: Requires principal encryption + client signature
+- **Pluggable keystores and plugin environments**: bring your own keystore or exploit framework
 
 ## Building
 
@@ -588,7 +589,7 @@ pub fn execute() -> FnResult<Json<Value>> {
 
 ### Plugin Interface (Go)
 
-Harness is engine-agnostic and supports multiple plugin formats through a unified interface. The WASM loader ([`plugin/wasm/loader.go`](plugin/wasm/loader.go)) is one such implementation that translates between the Go interface and Extism SDK calls to WASM modules compiled to `wasm32-wasip1` target.
+Harness is engine-agnostic and supports multiple plugin formats through a unified interface. The WASM loader ([`plugin/wasm/loader.go`](plugin/wasm/loader.go)) is one such implementation that translates between the Go interface and [Extism SDK](https://extism.org/) calls to WASM modules compiled to `wasm32-wasip1` target.
 
 ```go
 type Plugin interface {
@@ -707,7 +708,7 @@ plugin, err := plugin.LoadPlugin(payload)
 
 ## Platform Notes
 
-- **WASM Exploits**: Supported on all platforms via Extism SDK (wazero internally)
+- **WASM Exploits**: Supported on all platforms via [Extism SDK](https://extism.org/) (wazero internally)
 - **Keystore**: Platform-specific implementations for secure key storage
 - **Exploit Types**: Only WASM exploits supported (no Go plugins)
 
