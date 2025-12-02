@@ -1,4 +1,3 @@
-- WASM sandboxing: provides isolation boundaries (not perfect isolation - run on isolated, monitored systems)
 # Harness - Dual-Authorization Exploit Execution System
 
 A cryptographically secure system for storing, transporting, approving, and executing sensitive payloads including zero-day exploits and high-risk penetration testing tools. Harness enforces **dual-authorization** through cryptographic encryption and signatures, ensuring exploits cannot be executed without explicit approval from both the exploit owner (who encrypts the exploit) and the target (who signs execution arguments).
