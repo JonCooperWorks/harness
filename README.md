@@ -10,6 +10,7 @@ Harness can be used as a library, and the `cmd/...` packages are examples demons
 ## Purpose
 
 For offensive security teams and penetration testers who need to:
+
 - Store and transport sensitive exploits (zero-days, PoCs, custom payloads)
 - Enforce authorization boundaries preventing unauthorized execution
 - Maintain chain-of-custody with cryptographic proof of approval
@@ -41,6 +42,7 @@ For offensive security teams and penetration testers who need to:
 **Replays are intentionally allowed** within expiration window (default: 72h). Penetration testing requires multiple verification runs; time-limited expiration provides control mechanism.
 
 **Cryptographic Evidence**: System provides proof of:
+
 - Which exploit was received (encrypted with harness public key)
 - Which target was authorized (target-signed arguments)
 - When authorization expires (signed expiration timestamp)
@@ -68,6 +70,7 @@ Harness → Verifies signatures & expiration, decrypts, executes in WASM sandbox
 ```
 
 **Execution requires all:**
+
 - ✓ Exploit owner encryption + signature
 - ✓ Target signature on payload hash + expiration + arguments
 - ✓ Valid expiration
@@ -89,10 +92,12 @@ type Keystore interface {
 **Sign**: Returns raw Ed25519 signature (64 bytes).
 
 **DecryptWithContext**: Decrypts X25519-encrypted data with HKDF context:
+
 - `"harness-symmetric-key-v1"` for symmetric keys
 - `"harness-args-v1"` for execution arguments
 
 **Platform Implementations:**
+
 - **macOS**: Keychain Access (extensible to Secure Enclave)
 - **Linux**: libsecret/keyring (extensible to TPM/cloud KMS)
 - **Windows**: Credential Manager (extensible to TPM/Windows Key Storage Provider)
@@ -106,6 +111,7 @@ Harness uses a **registry pattern** for keystore implementations. To add a new k
 3. **Use automatically**: `NewKeystore()` looks up registered factories by platform
 
 **Registry API:**
+
 - `RegisterKeystore(platform string, factory KeystoreFactory)`
 - `GetKeystoreFactory(platform string) (KeystoreFactory, error)`
 - `ListRegisteredPlatforms() []string`
@@ -154,6 +160,7 @@ go build -o bin/listkeys ./cmd/listkeys
 ```
 
 **Import existing PEM keys:**
+
 ```bash
 ./bin/genkeys -import target_private.pem -keystore-key "target-key" -public target_public.pem
 ./bin/genkeys -import harness_private.pem -keystore-key "harness-key" -public harness_public.pem
@@ -164,6 +171,7 @@ go build -o bin/listkeys ./cmd/listkeys
 ### 2. Create WASM Exploit Payload
 
 Create WASM module using Extism PDK. Must export:
+
 - `name()` - exploit name (string)
 - `description()` - exploit description (string)
 - `json_schema()` - JSON schema for arguments (string)
@@ -217,12 +225,14 @@ Arguments auto-extracted from approved package (signed by target). Cannot overri
 All commands log cryptographic operations to stderr in JSON format (ISO 8601 timestamps, SHA256 hashes of signatures, keys, and payloads).
 
 **Common fields:**
+
 - `time`: ISO 8601 timestamp (nanosecond precision)
 - `level`: Log level (INFO, ERROR)
 - `msg`: Log identifier ("encryption log", "signing log", "verification log", "execution log")
 - `*_hash_sha256`: SHA256 hashes of signatures, public keys, and payloads
 
 **Command-specific fields:**
+
 - **encrypt**: `exploit_owner_signature_hash_sha256`, `exploit_owner_public_key_hash_sha256`, `harness_public_key_hash_sha256`
 - **sign**: `encrypted_payload_hash_sha256`, `target_public_key_hash_sha256`
 - **verify**: All signature and key hashes from both exploit owner and target
@@ -235,6 +245,7 @@ Logs written to stderr (won't interfere with JSON stdout). Provides complete aud
 Private keys stored in OS keystore, never written to disk.
 
 **Platform Support:**
+
 - **macOS**: Keychain Access (service: `harness`). Default: Login keychain. Custom: `export HARNESS_KEYCHAIN="harness-keys"`. Reduce prompts: Trust app in Keychain Access.
 - **Linux**: libsecret/keyring (service: `harness`)
 - **Windows**: Credential Manager (service: `harness`)
@@ -294,7 +305,7 @@ type Plugin interface {
 }
 ```
 
-**Extensibility**: You can add support for other plugin formats (e.g., Go plugins, Python scripts, native binaries) by creating an implementation of this interface. 
+**Extensibility**: You can add support for other plugin formats (e.g., Go plugins, Python scripts, native binaries) by creating an implementation of this interface.
 
 ### Adding New Plugin Loader Implementations
 
@@ -306,11 +317,10 @@ Harness uses a **registry pattern** for plugin loaders. To add a new loader:
 4. **Use**: `payload.Type = "python"` (matches registered identifier)
 
 **Registry API:**
+
 - `RegisterLoader(typeIdentifier string, factory LoaderFactory)`
 - `GetLoaderFactory(typeIdentifier string) (LoaderFactory, error)`
 - `ListRegisteredPluginTypes() []string`
-
-
 
 ## Platform Notes
 
@@ -321,6 +331,7 @@ Harness uses a **registry pattern** for plugin loaders. To add a new loader:
 ## Legal & Compliance
 
 Helps meet compliance requirements (CREST, ISO 27001, SOC2, PCI DSS) through:
+
 - **Authorization boundaries**: Dual-authorization (exploit owner + target signatures)
 - **Chain-of-custody**: Cryptographic proof of approval
 - **Audit trails**: Verifiable signatures and keystore access logs
