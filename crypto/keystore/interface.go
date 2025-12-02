@@ -37,6 +37,7 @@ type Keystore interface {
 	// The context parameter specifies the HKDF context string used for key derivation:
 	//   - "harness-symmetric-key-v1" for decrypting symmetric keys
 	//   - "harness-args-v1" for decrypting execution arguments
+	//   - "harness-envelope-v1" for decrypting envelopes (onion encryption)
 	//
 	// Returns the decrypted data.
 	DecryptWithContext(keyID string, encryptedKey []byte, context string) ([]byte, error)

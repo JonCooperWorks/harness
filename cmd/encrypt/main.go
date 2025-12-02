@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/pem"
 	"flag"
@@ -26,6 +25,7 @@ func main() {
 		pluginFile         = flag.String("plugin", "", "Path to plugin file to encrypt")
 		pluginType         = flag.String("type", "wasm", "Plugin type: wasm")
 		harnessPubKeyPath  = flag.String("harness-key", "", "Path to harness (pentester) public key file (required, for encrypting exploit)")
+		targetPubKeyPath   = flag.String("target-key", "", "Path to target public key file (required, for onion encryption of envelope)")
 		exploitKeystoreKey = flag.String("exploit-keystore-key", "", "Key ID in OS keystore for exploit owner's private key (required, for signing encrypted payload)")
 		outputPath         = flag.String("output", "plugin.encrypted", "Path to save encrypted plugin")
 	)
@@ -41,6 +41,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *targetPubKeyPath == "" {
+		logger.Error("missing required flag", "flag", "target-key", "message", "target public key for onion encryption of envelope")
+		os.Exit(1)
+	}
+
 	if *exploitKeystoreKey == "" {
 		logger.Error("missing required flag", "flag", "exploit-keystore-key", "message", "exploit owner's private key for signing encrypted payload")
 		os.Exit(1)
@@ -51,6 +56,14 @@ func main() {
 	harnessPubKey, err := loadPublicKey(*harnessPubKeyPath)
 	if err != nil {
 		logger.Error("failed to load pentester's public key", "error", err, "file", *harnessPubKeyPath)
+		os.Exit(1)
+	}
+
+	// Load target's public key (for onion encryption)
+	// The inner envelope is encrypted to the target's public key so only they can decrypt it
+	targetPubKey, err := loadPublicKey(*targetPubKeyPath)
+	if err != nil {
+		logger.Error("failed to load target's public key", "error", err, "file", *targetPubKeyPath)
 		os.Exit(1)
 	}
 
@@ -96,6 +109,7 @@ func main() {
 		PluginType:        *pluginType,
 		PluginName:        pluginName,
 		HarnessPubKey:     harnessPubKey,
+		TargetPubKey:      targetPubKey,
 		PrincipalKeystore: ks,
 		PrincipalKeyID:    *exploitKeystoreKey,
 	}
@@ -107,20 +121,12 @@ func main() {
 	}
 
 	// Calculate hash of exploit owner signature for logging
-	// Extract exploit owner signature from encrypted data
-	// Format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig]...
-	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
-	if len(result.EncryptedData) < headerSize+4 {
-		logger.Error("encrypted data too short", "size", len(result.EncryptedData), "min_size", headerSize+4)
+	// The signature is extracted from the inner envelope before encryption
+	if len(result.PrincipalSignature) == 0 {
+		logger.Error("principal signature not available for logging")
 		os.Exit(1)
 	}
-	exploitSigLen := int(binary.BigEndian.Uint32(result.EncryptedData[headerSize : headerSize+4]))
-	if len(result.EncryptedData) < headerSize+4+exploitSigLen {
-		logger.Error("encrypted data too short for exploit owner signature", "size", len(result.EncryptedData), "min_size", headerSize+4+exploitSigLen)
-		os.Exit(1)
-	}
-	exploitSignature := result.EncryptedData[headerSize+4 : headerSize+4+exploitSigLen]
-	exploitSigHash := sha256.Sum256(exploitSignature)
+	exploitSigHash := sha256.Sum256(result.PrincipalSignature)
 	exploitSigHashHex := hex.EncodeToString(exploitSigHash[:])
 
 	// Calculate hash of exploit owner public key for logging

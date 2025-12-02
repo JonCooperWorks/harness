@@ -24,6 +24,7 @@ import (
 // The encryption process uses ECDH key exchange to encrypt a symmetric AES-256-GCM key
 // with the pentester's public key, then encrypts the plugin data with that symmetric key.
 // The principal signs the encrypted payload hash to provide cryptographic proof of approval.
+// The inner envelope is then encrypted to the target's public key (onion encryption).
 type EncryptPluginRequest struct {
 	// PluginData is the raw plugin binary data (e.g., WASM file).
 	// The data is read from this io.Reader, making it suitable for streaming from S3, Lambda, etc.
@@ -38,6 +39,10 @@ type EncryptPluginRequest struct {
 	// HarnessPubKey is the pentester's public key for encrypting the symmetric key.
 	// The symmetric key is encrypted using X25519 key exchange with this public key.
 	HarnessPubKey ed25519.PublicKey
+	// TargetPubKey is the target's public key for onion encryption.
+	// The inner envelope is encrypted to this key using X25519 key exchange.
+	// Only the target can decrypt the envelope before signing.
+	TargetPubKey ed25519.PublicKey
 	// PrincipalKeystore is the keystore containing the principal's private key.
 	// The principal's key is used to sign the encrypted payload hash.
 	PrincipalKeystore keystore.Keystore
@@ -48,18 +53,25 @@ type EncryptPluginRequest struct {
 
 // EncryptPluginResult contains the encrypted plugin data and metadata.
 //
-// The EncryptedData field contains the complete encrypted file format:
-// [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+// The EncryptedData field contains the encrypted envelope (E), which is the inner envelope
+// encrypted to the target's public key:
+// [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
+// Where ciphertext contains: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 // Note: file_length is set to 0 initially and will be updated by SignEncryptedPlugin
 type EncryptPluginResult struct {
-	// EncryptedData is the complete encrypted file format:
-	// [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	// EncryptedData is the encrypted envelope (E), encrypted to target's public key:
+	// [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
+	// The inner envelope (E_inner) is encrypted using X25519 + AES-256-GCM.
 	EncryptedData []byte
 	// PluginName is the name extracted from the plugin or provided in the request.
 	PluginName string
+	// PrincipalSignature is the exploit owner's signature (for logging purposes).
+	// This is extracted from the inner envelope before encryption.
+	PrincipalSignature []byte
 }
 
-// EncryptPlugin encrypts a plugin and signs it with the principal's key.
+// EncryptPlugin encrypts a plugin and signs it with the principal's key, then encrypts
+// the inner envelope to the target's public key (onion encryption).
 //
 // This function implements the principal's role in the dual-authorization model:
 //  1. Reads the plugin data from the provided io.Reader
@@ -67,12 +79,13 @@ type EncryptPluginResult struct {
 //  3. Encrypts the plugin data with AES-256-GCM using the symmetric key
 //  4. Encrypts the symmetric key using ECDH key exchange with the pentester's public key
 //  5. Signs the encrypted payload hash with the principal's private key
+//  6. Encrypts the inner envelope to the target's public key (onion encryption)
 //
 // The function works with io.Reader, making it suitable for Lambda/S3 use cases where
 // plugin data may be streamed rather than loaded entirely into memory.
 //
-// The returned EncryptedData can be further signed by a client using SignEncryptedPlugin
-// to create an approved execution package.
+// The returned EncryptedData is the encrypted envelope (E), which must be decrypted by
+// the target before signing using SignEncryptedPlugin to create an approved execution package.
 func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 	if req == nil {
 		return nil, errors.New("request cannot be nil")
@@ -82,6 +95,9 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 	}
 	if req.HarnessPubKey == nil {
 		return nil, errors.New("harness public key cannot be nil")
+	}
+	if req.TargetPubKey == nil {
+		return nil, errors.New("target public key cannot be nil")
 	}
 	if req.PrincipalKeystore == nil {
 		return nil, errors.New("principal keystore cannot be nil")
@@ -187,10 +203,104 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 	// Write encrypted payload (already constructed above)
 	output = append(output, encryptedPayload...)
 
+	// This is the inner envelope (E_inner)
+	innerEnvelope := output
+
+	// Extract principal signature for logging (before encryption)
+	// Format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig]...
+	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
+	if len(innerEnvelope) < headerSize+4 {
+		return nil, errors.New("inner envelope too short for signature extraction")
+	}
+	principalSigLen := int(binary.BigEndian.Uint32(innerEnvelope[headerSize : headerSize+4]))
+	if len(innerEnvelope) < headerSize+4+principalSigLen {
+		return nil, errors.New("inner envelope too short for signature")
+	}
+	principalSig := make([]byte, principalSigLen)
+	copy(principalSig, innerEnvelope[headerSize+4:headerSize+4+principalSigLen])
+
+	// Encrypt inner envelope to target's public key (onion encryption)
+	encryptedEnvelope, err := encryptEnvelope(innerEnvelope, req.TargetPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt envelope to target: %w", err)
+	}
+
 	return &EncryptPluginResult{
-		EncryptedData: output,
-		PluginName:    pluginName,
+		EncryptedData:      encryptedEnvelope,
+		PluginName:         pluginName,
+		PrincipalSignature: principalSig,
 	}, nil
+}
+
+// encryptEnvelope encrypts the inner envelope to the target's public key using X25519 + AES-256-GCM
+func encryptEnvelope(innerEnvelope []byte, targetPubKey ed25519.PublicKey) ([]byte, error) {
+	if len(targetPubKey) != ed25519.PublicKeySize {
+		return nil, errors.New("invalid target public key size")
+	}
+
+	// Generate ephemeral Ed25519 key pair
+	ephemeralPublic, ephemeralPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate ephemeral key: %w", err)
+	}
+
+	// Convert Ed25519 keys to X25519 for key exchange
+	ephemeralX25519Private, err := keystore.Ed25519ToX25519PrivateKey(ephemeralPrivate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert ephemeral private key to X25519: %w", err)
+	}
+
+	targetX25519Public, err := keystore.Ed25519ToX25519PublicKey(targetPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert target public key to X25519: %w", err)
+	}
+
+	// Compute shared secret using X25519
+	var sharedSecret [32]byte
+	curve25519.ScalarMult(&sharedSecret, (*[32]byte)(ephemeralX25519Private), (*[32]byte)(targetX25519Public))
+
+	// Derive AES key from shared secret using HKDF
+	aesKey, err := deriveKey(sharedSecret[:], "harness-envelope-v1")
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive key: %w", err)
+	}
+
+	// Encrypt inner envelope with AES-GCM
+	nonce := make([]byte, 12) // GCM standard nonce size
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
+	}
+
+	block, err := aes.NewCipher(aesKey[:])
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	// Encrypt with GCM
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	ciphertext := gcm.Seal(nil, nonce, innerEnvelope, nil)
+
+	// Build result: [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
+	result := make([]byte, 0, 32+12+len(ciphertext))
+
+	// Encode ephemeral X25519 public key (32 bytes)
+	ephemeralX25519PubBytes, err := keystore.Ed25519ToX25519PublicKey(ephemeralPublic)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert ephemeral public key to X25519: %w", err)
+	}
+	result = append(result, ephemeralX25519PubBytes...)
+
+	// Append nonce
+	result = append(result, nonce...)
+
+	// Append ciphertext (includes authentication tag)
+	result = append(result, ciphertext...)
+
+	return result, nil
 }
 
 // encryptSymmetricKey encrypts the symmetric key using X25519

@@ -20,21 +20,24 @@ import (
 // SignEncryptedPluginRequest contains all the information needed to sign an encrypted plugin.
 //
 // This request implements the client's role in the dual-authorization model:
-// signing execution arguments and expiration to approve exploit execution.
+// decrypting the envelope, then signing execution arguments and expiration to approve exploit execution.
 type SignEncryptedPluginRequest struct {
-	// EncryptedData is the encrypted plugin data (from EncryptPlugin).
-	// Format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	// EncryptedData is the encrypted envelope (E) from EncryptPlugin.
+	// Format: [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
+	// Where ciphertext contains the inner envelope encrypted to target's public key.
 	// The data is read from this io.Reader, making it suitable for streaming from S3, Lambda, etc.
 	EncryptedData io.Reader
 	// ArgsJSON is the JSON arguments to sign and encrypt.
 	// These arguments are encrypted with the pentester's public key before signing,
 	// ensuring only the pentester can read them.
 	ArgsJSON []byte
-	// ClientKeystore is the keystore containing the client's private key.
-	// The client's key is used to sign the encrypted payload hash, expiration, and arguments.
+	// ClientKeystore is the keystore containing the client's (target's) private key.
+	// The client's key is used to:
+	//   - Decrypt the envelope (E) to get the inner envelope (E_inner)
+	//   - Sign the encrypted payload hash, expiration, and arguments
 	ClientKeystore keystore.Keystore
-	// ClientKeyID is the key ID in the keystore for the client's private key.
-	// This key is used to sign the approval of execution arguments and expiration.
+	// ClientKeyID is the key ID in the keystore for the client's (target's) private key.
+	// This key is used to decrypt the envelope and sign the approval of execution arguments and expiration.
 	ClientKeyID string
 	// PentesterPubKey is the pentester's public key for encrypting arguments.
 	// Arguments are encrypted using X25519 key exchange with this public key.
@@ -58,14 +61,15 @@ type SignEncryptedPluginResult struct {
 	ExpirationTime time.Time
 }
 
-// SignEncryptedPlugin signs an encrypted plugin with client arguments.
+// SignEncryptedPlugin decrypts the encrypted envelope and signs it with client arguments.
 //
 // This function implements the client's role in the dual-authorization model:
-//  1. Reads the encrypted plugin data from EncryptPlugin
-//  2. Encrypts execution arguments with the pentester's public key (ECDH + AES-256-GCM)
-//  3. Calculates expiration timestamp (defaults to 72 hours if not provided)
-//  4. Signs the encrypted payload hash, expiration, and encrypted arguments with the client's private key
-//  5. Appends the signature, expiration, and encrypted arguments to create an approved package
+//  1. Reads the encrypted envelope (E) from EncryptPlugin
+//  2. Decrypts the envelope using the target's private key to get the inner envelope (E_inner)
+//  3. Encrypts execution arguments with the pentester's public key (ECDH + AES-256-GCM)
+//  4. Calculates expiration timestamp (defaults to 72 hours if not provided)
+//  5. Signs the encrypted payload hash, expiration, and encrypted arguments with the client's private key
+//  6. Appends the signature, expiration, and encrypted arguments to create an approved package
 //
 // The function works with io.Reader, making it suitable for Lambda/S3 use cases where
 // encrypted data may be streamed rather than loaded entirely into memory.
@@ -91,11 +95,21 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 		return nil, errors.New("pentester public key cannot be nil")
 	}
 
-	// Read all encrypted data
-	encryptedData, err := io.ReadAll(req.EncryptedData)
+	// Read all encrypted envelope data
+	encryptedEnvelope, err := io.ReadAll(req.EncryptedData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read encrypted data: %w", err)
+		return nil, fmt.Errorf("failed to read encrypted envelope: %w", err)
 	}
+
+	// Decrypt the envelope using target's private key
+	// Format: [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
+	innerEnvelope, err := req.ClientKeystore.DecryptWithContext(req.ClientKeyID, encryptedEnvelope, "harness-envelope-v1")
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt envelope: %w", err)
+	}
+
+	// Now we have the inner envelope (E_inner), proceed with signing
+	encryptedData := innerEnvelope
 
 	// Validate args JSON
 	var args json.RawMessage
