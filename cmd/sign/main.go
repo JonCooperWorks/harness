@@ -19,12 +19,12 @@ import (
 
 func main() {
 	var (
-		encryptedFile       = flag.String("file", "", "Path to encrypted plugin file (from encrypt command)")
-		clientKeyID         = flag.String("client-keystore-key", "", "Key ID in OS keystore for client's private key (required)")
-		pentesterPubKeyFile = flag.String("pentester-key", "", "Path to pentester's public key file (required, for encrypting arguments)")
-		argsJSON            = flag.String("args", "", "JSON arguments to sign (required)")
-		expirationDur       = flag.Duration("expiration", 72*time.Hour, "Expiration duration from now (default: 72h = 3 days)")
-		outputPath          = flag.String("output", "", "Path to save approved plugin (defaults to input file with .approved suffix)")
+		encryptedFile     = flag.String("file", "", "Path to encrypted plugin file (from encrypt command)")
+		targetKeystoreKey = flag.String("target-keystore-key", "", "Key ID in OS keystore for target's private key (required, for signing execution arguments)")
+		harnessPubKeyFile = flag.String("harness-key", "", "Path to harness (pentester) public key file (required, for encrypting arguments)")
+		argsJSON          = flag.String("args", "", "JSON execution arguments to sign (required)")
+		expirationDur     = flag.Duration("expiration", 72*time.Hour, "Expiration duration from now (default: 72h = 3 days)")
+		outputPath        = flag.String("output", "", "Path to save approved plugin (defaults to input file with .approved suffix)")
 	)
 	flag.Parse()
 
@@ -33,18 +33,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *clientKeyID == "" {
-		fmt.Fprintf(os.Stderr, "Error: -client-keystore-key is required (private keys must be stored in OS keystore)\n")
+	if *targetKeystoreKey == "" {
+		fmt.Fprintf(os.Stderr, "Error: -target-keystore-key is required (target's private key for signing execution arguments)\n")
 		os.Exit(1)
 	}
 
-	if *pentesterPubKeyFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -pentester-key is required (pentester's public key for encrypting arguments)\n")
+	if *harnessPubKeyFile == "" {
+		fmt.Fprintf(os.Stderr, "Error: -harness-key is required (harness public key for encrypting arguments)\n")
 		os.Exit(1)
 	}
 
 	if *argsJSON == "" {
-		fmt.Fprintf(os.Stderr, "Error: -args is required (client must sign execution arguments)\n")
+		fmt.Fprintf(os.Stderr, "Error: -args is required (target must sign execution arguments)\n")
 		os.Exit(1)
 	}
 
@@ -59,10 +59,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load pentester's public key for encrypting arguments
-	pentesterPubKey, err := loadPublicKey(*pentesterPubKeyFile)
+	// Load harness public key for encrypting arguments
+	harnessPubKey, err := loadPublicKey(*harnessPubKeyFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading pentester's public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error loading harness public key: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -82,8 +82,8 @@ func main() {
 		EncryptedData:   encryptedFileHandle,
 		ArgsJSON:        []byte(*argsJSON),
 		ClientKeystore:  ks,
-		ClientKeyID:     *clientKeyID,
-		PentesterPubKey: pentesterPubKey,
+		ClientKeyID:     *targetKeystoreKey,
+		PentesterPubKey: harnessPubKey,
 		Expiration:      &expirationTime,
 	}
 
@@ -128,24 +128,24 @@ func main() {
 	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
 	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
 
-	// Get client public key for logging
-	clientPubKey, err := ks.GetPublicKey(*clientKeyID)
+	// Get target public key for logging
+	targetPubKey, err := ks.GetPublicKey(*targetKeystoreKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting client public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error getting target public key: %v\n", err)
 		os.Exit(1)
 	}
-	pubKeyBytes, err := x509.MarshalPKIXPublicKey(clientPubKey)
+	targetPubKeyBytes, err := x509.MarshalPKIXPublicKey(targetPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error marshaling target public key: %v\n", err)
 		os.Exit(1)
 	}
-	pubKeyHash := sha256.Sum256(pubKeyBytes)
-	pubKeyHashHex := hex.EncodeToString(pubKeyHash[:])
+	targetPubKeyHash := sha256.Sum256(targetPubKeyBytes)
+	targetPubKeyHashHex := hex.EncodeToString(targetPubKeyHash[:])
 
 	// Log signing details
 	fmt.Fprintf(os.Stderr, "[SIGNING LOG] %s\n", time.Now().Format(time.RFC3339))
 	fmt.Fprintf(os.Stderr, "[SIGNING LOG] Encrypted Payload Hash (SHA256): %s\n", encryptedPayloadHashHex)
-	fmt.Fprintf(os.Stderr, "[SIGNING LOG] Client Public Key Hash (SHA256): %s\n", pubKeyHashHex)
+	fmt.Fprintf(os.Stderr, "[SIGNING LOG] Target Public Key Hash (SHA256): %s\n", targetPubKeyHashHex)
 
 	output := result.ApprovedData
 

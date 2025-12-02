@@ -16,7 +16,7 @@ import (
 	"github.com/joncooperworks/harness/crypto/keystore"
 )
 
-	// SignEncryptedPluginRequest contains all the information needed to sign an encrypted plugin.
+// SignEncryptedPluginRequest contains all the information needed to sign an encrypted plugin.
 //
 // This request implements the client's role in the dual-authorization model:
 // signing execution arguments and expiration to approve exploit execution.

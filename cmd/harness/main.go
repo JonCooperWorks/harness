@@ -21,10 +21,10 @@ import (
 
 func main() {
 	var (
-		encryptedFile       = flag.String("file", "", "Path to approved plugin file (with signature)")
-		keystoreKeyID       = flag.String("keystore-key", "", "Key ID in OS keystore for private key (required)")
-		signaturePubKeyFile = flag.String("signature-key", "", "Path to public key file for verifying signature (required)")
-		principalPubKeyFile = flag.String("principal-key", "", "Path to principal's public key file (required, for verifying payload signature)")
+		encryptedFile      = flag.String("file", "", "Path to approved plugin file (with target signature)")
+		harnessKeystoreKey = flag.String("harness-keystore-key", "", "Key ID in OS keystore for harness (pentester) private key (required, for decryption)")
+		targetPubKeyFile   = flag.String("target-key", "", "Path to target's public key file (required, for verifying argument signature)")
+		exploitPubKeyFile  = flag.String("exploit-key", "", "Path to exploit owner's public key file (required, for verifying payload signature)")
 	)
 	flag.Parse()
 
@@ -33,49 +33,49 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *keystoreKeyID == "" {
-		fmt.Fprintf(os.Stderr, "Error: -keystore-key is required (private key must be stored in OS keystore)\n")
+	if *harnessKeystoreKey == "" {
+		fmt.Fprintf(os.Stderr, "Error: -harness-keystore-key is required (harness private key must be stored in OS keystore)\n")
 		os.Exit(1)
 	}
 
-	if *signaturePubKeyFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -signature-key is required (public key for verifying signature)\n")
+	if *targetPubKeyFile == "" {
+		fmt.Fprintf(os.Stderr, "Error: -target-key is required (target's public key for verifying argument signature)\n")
 		os.Exit(1)
 	}
 
-	if *principalPubKeyFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -principal-key is required (principal's public key for verifying payload signature)\n")
+	if *exploitPubKeyFile == "" {
+		fmt.Fprintf(os.Stderr, "Error: -exploit-key is required (exploit owner's public key for verifying payload signature)\n")
 		os.Exit(1)
 	}
 
-	// Load public key for signature verification
-	signaturePubKey, err := loadPublicKey(*signaturePubKeyFile)
+	// Load target's public key for signature verification
+	targetPubKey, err := loadPublicKey(*targetPubKeyFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading signature public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error loading target's public key: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Load principal's public key (required)
-	principalPubKey, err := loadPublicKey(*principalPubKeyFile)
+	// Load exploit owner's public key (required)
+	exploitPubKey, err := loadPublicKey(*exploitPubKeyFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading principal's public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error loading exploit owner's public key: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Get pentester's public key from keystore for logging
+	// Get harness public key from keystore for logging
 	ks, err := keystore.NewKeystore()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
 		os.Exit(1)
 	}
-	pentesterPubKey, err := ks.GetPublicKey(*keystoreKeyID)
+	harnessPubKey, err := ks.GetPublicKey(*harnessKeystoreKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting pentester's public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error getting harness public key: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Create PresidentialOrder from keystore
-	po, err := crypto.NewPresidentialOrderFromKeystoreWithPrincipal(*keystoreKeyID, signaturePubKey, principalPubKey)
+	po, err := crypto.NewPresidentialOrderFromKeystoreWithPrincipal(*harnessKeystoreKey, targetPubKey, exploitPubKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating PresidentialOrder from keystore: %v\n", err)
 		os.Exit(1)
@@ -100,40 +100,40 @@ func main() {
 	exploitHash := sha256.Sum256(result.Payload.Data)
 	exploitHashHex := hex.EncodeToString(exploitHash[:])
 
-	// Calculate hash of client signature
-	signatureHash := sha256.Sum256(result.ClientSignature)
-	signatureHashHex := hex.EncodeToString(signatureHash[:])
+	// Calculate hash of target signature
+	targetSigHash := sha256.Sum256(result.ClientSignature)
+	targetSigHashHex := hex.EncodeToString(targetSigHash[:])
 
-	// Calculate hash of client public key
-	clientPubKeyBytes, err := x509.MarshalPKIXPublicKey(signaturePubKey)
+	// Calculate hash of target public key
+	targetPubKeyBytes, err := x509.MarshalPKIXPublicKey(targetPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling client public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error marshaling target public key: %v\n", err)
 		os.Exit(1)
 	}
-	clientPubKeyHash := sha256.Sum256(clientPubKeyBytes)
-	clientPubKeyHashHex := hex.EncodeToString(clientPubKeyHash[:])
+	targetPubKeyHash := sha256.Sum256(targetPubKeyBytes)
+	targetPubKeyHashHex := hex.EncodeToString(targetPubKeyHash[:])
 
-	// Calculate hash of pentester public key
-	pentesterPubKeyBytes, err := x509.MarshalPKIXPublicKey(pentesterPubKey)
+	// Calculate hash of harness public key
+	harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling pentester public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error marshaling harness public key: %v\n", err)
 		os.Exit(1)
 	}
-	pentesterPubKeyHash := sha256.Sum256(pentesterPubKeyBytes)
-	pentesterPubKeyHashHex := hex.EncodeToString(pentesterPubKeyHash[:])
+	harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
+	harnessPubKeyHashHex := hex.EncodeToString(harnessPubKeyHash[:])
 
-	// Calculate hash of principal signature
-	principalSigHash := sha256.Sum256(result.PrincipalSignature)
-	principalSigHashHex := hex.EncodeToString(principalSigHash[:])
+	// Calculate hash of exploit owner signature
+	exploitSigHash := sha256.Sum256(result.PrincipalSignature)
+	exploitSigHashHex := hex.EncodeToString(exploitSigHash[:])
 
-	// Calculate hash of principal public key
-	principalPubKeyBytes, err := x509.MarshalPKIXPublicKey(principalPubKey)
+	// Calculate hash of exploit owner public key
+	exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(exploitPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling principal public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error marshaling exploit owner public key: %v\n", err)
 		os.Exit(1)
 	}
-	principalPubKeyHash := sha256.Sum256(principalPubKeyBytes)
-	principalPubKeyHashHex := hex.EncodeToString(principalPubKeyHash[:])
+	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
+	exploitPubKeyHashHex := hex.EncodeToString(exploitPubKeyHash[:])
 
 	// Calculate encrypted payload hash for logging
 	// Extract encrypted payload: skip header(10) + principal_sig_len(4) + principal_sig, then read metadata_len(4) + metadata + encrypted data
@@ -162,11 +162,11 @@ func main() {
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Plugin Type: %s\n", result.Payload.Type.String())
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Plugin Name: %s\n", result.Payload.Name)
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Exploit Binary Hash (SHA256): %s\n", exploitHashHex)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Principal Signature Hash (SHA256): %s\n", principalSigHashHex)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Principal Public Key Hash (SHA256): %s\n", principalPubKeyHashHex)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Client Signature Hash (SHA256): %s\n", signatureHashHex)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Client Public Key Hash (SHA256): %s\n", clientPubKeyHashHex)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Pentester Public Key Hash (SHA256): %s\n", pentesterPubKeyHashHex)
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Exploit Owner Signature Hash (SHA256): %s\n", exploitSigHashHex)
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Exploit Owner Public Key Hash (SHA256): %s\n", exploitPubKeyHashHex)
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Target Signature Hash (SHA256): %s\n", targetSigHashHex)
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Target Public Key Hash (SHA256): %s\n", targetPubKeyHashHex)
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Harness Public Key Hash (SHA256): %s\n", harnessPubKeyHashHex)
 
 	// Load plugin
 	plg, err := plugin.LoadPlugin(result.Payload)

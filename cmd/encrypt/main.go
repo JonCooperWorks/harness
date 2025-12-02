@@ -20,11 +20,11 @@ import (
 
 func main() {
 	var (
-		pluginFile           = flag.String("plugin", "", "Path to plugin file to encrypt")
-		pluginType           = flag.String("type", "wasm", "Plugin type: wasm")
-		harnessPubKeyPath    = flag.String("harness-key", "", "Path to pentester's public key (for encryption - this is the harness key)")
-		principalKeystoreKey = flag.String("principal-keystore-key", "", "Key ID in OS keystore for principal's private key (for signing unencrypted payload)")
-		outputPath           = flag.String("output", "plugin.encrypted", "Path to save encrypted plugin")
+		pluginFile         = flag.String("plugin", "", "Path to plugin file to encrypt")
+		pluginType         = flag.String("type", "wasm", "Plugin type: wasm")
+		harnessPubKeyPath  = flag.String("harness-key", "", "Path to harness (pentester) public key file (required, for encrypting exploit)")
+		exploitKeystoreKey = flag.String("exploit-keystore-key", "", "Key ID in OS keystore for exploit owner's private key (required, for signing encrypted payload)")
+		outputPath         = flag.String("output", "plugin.encrypted", "Path to save encrypted plugin")
 	)
 	flag.Parse()
 
@@ -34,12 +34,12 @@ func main() {
 	}
 
 	if *harnessPubKeyPath == "" {
-		fmt.Fprintf(os.Stderr, "Error: -harness-key is required\n")
+		fmt.Fprintf(os.Stderr, "Error: -harness-key is required (harness public key for encrypting exploit)\n")
 		os.Exit(1)
 	}
 
-	if *principalKeystoreKey == "" {
-		fmt.Fprintf(os.Stderr, "Error: -principal-keystore-key is required\n")
+	if *exploitKeystoreKey == "" {
+		fmt.Fprintf(os.Stderr, "Error: -exploit-keystore-key is required (exploit owner's private key for signing encrypted payload)\n")
 		os.Exit(1)
 	}
 
@@ -51,7 +51,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load keystore for principal signature
+	// Load keystore for exploit owner signature
 	ks, err := keystore.NewKeystore()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
@@ -80,10 +80,10 @@ func main() {
 	// Note: Plugin interface doesn't have Close(), but implementations may have cleanup
 	// For WASM plugins, resources are managed by the plugin loader
 
-	// Get principal public key for logging
-	principalPubKey, err := ks.GetPublicKey(*principalKeystoreKey)
+	// Get exploit owner public key for logging
+	exploitPubKey, err := ks.GetPublicKey(*exploitKeystoreKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting principal public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error getting exploit owner public key: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -94,7 +94,7 @@ func main() {
 		PluginName:        pluginName,
 		HarnessPubKey:     harnessPubKey,
 		PrincipalKeystore: ks,
-		PrincipalKeyID:    *principalKeystoreKey,
+		PrincipalKeyID:    *exploitKeystoreKey,
 	}
 
 	result, err := crypto.EncryptPlugin(encryptReq)
@@ -103,46 +103,46 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Calculate hash of principal signature for logging
-	// Extract principal signature from encrypted data
+	// Calculate hash of exploit owner signature for logging
+	// Extract exploit owner signature from encrypted data
 	// Format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig]...
 	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
 	if len(result.EncryptedData) < headerSize+4 {
 		fmt.Fprintf(os.Stderr, "Error: encrypted data too short\n")
 		os.Exit(1)
 	}
-	principalSigLen := int(binary.BigEndian.Uint32(result.EncryptedData[headerSize : headerSize+4]))
-	if len(result.EncryptedData) < headerSize+4+principalSigLen {
-		fmt.Fprintf(os.Stderr, "Error: encrypted data too short for principal signature\n")
+	exploitSigLen := int(binary.BigEndian.Uint32(result.EncryptedData[headerSize : headerSize+4]))
+	if len(result.EncryptedData) < headerSize+4+exploitSigLen {
+		fmt.Fprintf(os.Stderr, "Error: encrypted data too short for exploit owner signature\n")
 		os.Exit(1)
 	}
-	principalSignature := result.EncryptedData[headerSize+4 : headerSize+4+principalSigLen]
-	principalSigHash := sha256.Sum256(principalSignature)
-	principalSigHashHex := hex.EncodeToString(principalSigHash[:])
+	exploitSignature := result.EncryptedData[headerSize+4 : headerSize+4+exploitSigLen]
+	exploitSigHash := sha256.Sum256(exploitSignature)
+	exploitSigHashHex := hex.EncodeToString(exploitSigHash[:])
 
-	// Calculate hash of principal public key for logging
-	principalPubKeyBytes, err := x509.MarshalPKIXPublicKey(principalPubKey)
+	// Calculate hash of exploit owner public key for logging
+	exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(exploitPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling principal public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error marshaling exploit owner public key: %v\n", err)
 		os.Exit(1)
 	}
-	principalPubKeyHash := sha256.Sum256(principalPubKeyBytes)
-	principalPubKeyHashHex := hex.EncodeToString(principalPubKeyHash[:])
+	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
+	exploitPubKeyHashHex := hex.EncodeToString(exploitPubKeyHash[:])
 
-	// Calculate hash of pentester's public key for logging
-	pubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
+	// Calculate hash of harness public key for logging
+	harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error marshaling harness public key: %v\n", err)
 		os.Exit(1)
 	}
-	pubKeyHash := sha256.Sum256(pubKeyBytes)
-	pubKeyHashHex := hex.EncodeToString(pubKeyHash[:])
+	harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
+	harnessPubKeyHashHex := hex.EncodeToString(harnessPubKeyHash[:])
 
 	// Log encryption details
 	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] %s\n", time.Now().Format(time.RFC3339))
-	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Principal Signature Hash (SHA256): %s\n", principalSigHashHex)
-	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Principal Public Key Hash (SHA256): %s\n", principalPubKeyHashHex)
-	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Pentester Public Key Hash (SHA256): %s\n", pubKeyHashHex)
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Exploit Owner Signature Hash (SHA256): %s\n", exploitSigHashHex)
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Exploit Owner Public Key Hash (SHA256): %s\n", exploitPubKeyHashHex)
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Harness Public Key Hash (SHA256): %s\n", harnessPubKeyHashHex)
 
 	output := result.EncryptedData
 
