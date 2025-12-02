@@ -4,6 +4,8 @@ A cryptographically secure system for storing, transporting, approving, and exec
 
 **Documentation**: [pkg.go.dev/github.com/joncooperworks/harness](https://pkg.go.dev/github.com/joncooperworks/harness)
 
+Harness can be used as a library, and the `cmd/...` packages are examples demonstrating how to integrate it into your own applications. You can deploy harness in various environments (AWS Lambda, containers, isolated VMs) to further limit access to payloads and enforce additional execution boundaries.
+
 ## Purpose
 
 For offensive security teams and penetration testers who need to:
