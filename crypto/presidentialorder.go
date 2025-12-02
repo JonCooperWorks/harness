@@ -212,20 +212,22 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		}
 		candidateArgsLen := int(binary.BigEndian.Uint32(fileData[argsLenPos : argsLenPos+4]))
 
-		// Check if args_json would fit (starts right after args_len, ends at file end)
+		// Check if encrypted_args would fit (starts right after args_len, ends at file end)
 		argsStart := argsLenPos + 4
 		expectedArgsEnd := argsStart + candidateArgsLen
 		if expectedArgsEnd == len(fileData) {
-			// Validate it looks like JSON
+			// Validate it looks like encrypted args
+			// Encrypted args format: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
+			// Minimum size is 65+12+16=93 bytes, and first byte should be 0x04 (uncompressed public key)
 			if candidateArgsLen > 0 && argsStart < len(fileData) {
-				argsJSON := fileData[argsStart : argsStart+candidateArgsLen]
-				if len(argsJSON) > 0 && (argsJSON[0] == '{' || argsJSON[0] == '[') {
-					fileArgsJSON = argsJSON
+				encryptedArgs := fileData[argsStart : argsStart+candidateArgsLen]
+				if len(encryptedArgs) >= 93 && encryptedArgs[0] == 0x04 {
+					fileArgsJSON = encryptedArgs
 					foundArgsLen = true
 					break
 				}
 			} else if candidateArgsLen == 0 {
-				// Empty args_json is valid
+				// Empty encrypted args is valid
 				fileArgsJSON = []byte{}
 				foundArgsLen = true
 				break
@@ -345,11 +347,13 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	// [principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data])
 	encryptedPayloadHash := sha256.Sum256(encryptedPayloadForHash)
 
-	// Verify client signature: Signature covers encrypted_payload_hash (32 bytes) + expiration (8 bytes) + args_json
-	dataToVerify := make([]byte, 32+8+len(fileArgsJSON))
+	// Verify client signature: Signature covers encrypted_payload_hash (32 bytes) + expiration (8 bytes) + encrypted_args
+	// Note: fileArgsJSON is actually encrypted args at this point
+	encryptedArgs := fileArgsJSON
+	dataToVerify := make([]byte, 32+8+len(encryptedArgs))
 	copy(dataToVerify[0:32], encryptedPayloadHash[:])
 	binary.BigEndian.PutUint64(dataToVerify[32:40], uint64(expirationUnix))
-	copy(dataToVerify[40:], fileArgsJSON)
+	copy(dataToVerify[40:], encryptedArgs)
 
 	dataHash := sha256.Sum256(dataToVerify)
 	var sig struct {
@@ -444,12 +448,98 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, errors.New("principal signature verification failed (signature must cover unencrypted payload)")
 	}
 
+	// Decrypt arguments using pentester's private key (from keystore)
+	var decryptedArgs []byte
+	if po.keystore != nil && po.keystoreKeyID != "" {
+		// Use keystore for decryption (keys never leave secure storage)
+		decryptedArgs, err = po.decryptArgs(encryptedArgs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt arguments: %w", err)
+		}
+	} else if po.privateKey != nil {
+		// Fallback to in-memory private key (deprecated)
+		decryptedArgs, err = po.decryptArgsWithKey(encryptedArgs, po.privateKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt arguments: %w", err)
+		}
+	} else {
+		return nil, errors.New("no keystore or private key available for argument decryption")
+	}
+
 	return &DecryptedResult{
 		Payload:            &payload,
-		Args:               fileArgsJSON,
+		Args:               decryptedArgs,
 		ClientSignature:    clientSignature,
 		PrincipalSignature: principalSignature,
 	}, nil
+}
+
+// decryptArgs decrypts arguments using keystore (keys never leave secure storage)
+// The encrypted args format is: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
+// DecryptSymmetricKey can handle this format directly
+func (po *PresidentialOrderImpl) decryptArgs(encryptedArgs []byte) ([]byte, error) {
+	if len(encryptedArgs) < 65+12+16 { // Need at least ephemeral key + nonce + tag
+		return nil, errors.New("encrypted args too short")
+	}
+
+	// Use keystore to decrypt (it will compute ECDH internally)
+	// DecryptSymmetricKey expects format: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
+	// which matches our encryptedArgs format
+	return po.keystore.DecryptSymmetricKey(po.keystoreKeyID, encryptedArgs)
+}
+
+// decryptArgsWithKey decrypts arguments using in-memory private key (deprecated)
+func (po *PresidentialOrderImpl) decryptArgsWithKey(encryptedArgs []byte, privateKey *ecdsa.PrivateKey) ([]byte, error) {
+	if len(encryptedArgs) < 65+12+16 { // Need at least ephemeral key + nonce + tag
+		return nil, errors.New("encrypted args too short")
+	}
+
+	// Extract ephemeral public key (uncompressed format: 0x04 || x || y)
+	ephemeralPubKeyBytes := encryptedArgs[:65]
+	x := new(big.Int).SetBytes(ephemeralPubKeyBytes[1:33])
+	y := new(big.Int).SetBytes(ephemeralPubKeyBytes[33:65])
+
+	// Create ephemeral public key from point
+	ephemeralPubKey := &ecdsa.PublicKey{
+		Curve: privateKey.Curve,
+		X:     x,
+		Y:     y,
+	}
+
+	// Compute shared secret using ECDH
+	sharedX, _ := ephemeralPubKey.Curve.ScalarMult(ephemeralPubKey.X, ephemeralPubKey.Y, privateKey.D.Bytes())
+	sharedSecret := sharedX.Bytes()
+
+	// Derive AES key from shared secret using SHA256
+	aesKey := sha256.Sum256(sharedSecret)
+
+	// Extract nonce and ciphertext
+	encryptedData := encryptedArgs[65:]
+	if len(encryptedData) < 12+16 { // Need at least nonce (12) + tag (16)
+		return nil, errors.New("encrypted args data too short")
+	}
+
+	nonce := encryptedData[:12]
+	ciphertext := encryptedData[12:]
+
+	block, err := aes.NewCipher(aesKey[:])
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	// Decrypt and verify authentication tag
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt args: %w", err)
+	}
+
+	return plaintext, nil
 }
 
 // decryptSymmetricKey decrypts the symmetric key using ECDSA key exchange

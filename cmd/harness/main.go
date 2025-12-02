@@ -111,8 +111,10 @@ func main() {
 		expectedArgsEnd := argsStart + candidateArgsLen
 		if expectedArgsEnd == len(fileData) {
 			if candidateArgsLen > 0 && argsStart < len(fileData) {
-				argsJSON := fileData[argsStart : argsStart+candidateArgsLen]
-				if len(argsJSON) > 0 && (argsJSON[0] == '{' || argsJSON[0] == '[') {
+				encryptedArgs := fileData[argsStart : argsStart+candidateArgsLen]
+				// Encrypted args format: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
+				// Minimum size is 65+12+16=93 bytes, and first byte should be 0x04 (uncompressed public key)
+				if len(encryptedArgs) >= 93 && encryptedArgs[0] == 0x04 {
 					foundArgsLen = true
 					break
 				}

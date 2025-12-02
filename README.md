@@ -244,12 +244,15 @@ See [Plugin API](#plugin-api) section for details.
 ./bin/sign \
   -file exploit.encrypted \
   -client-keystore-key "client-key" \
+  -pentester-key pentester_public.pem \
   -args '{"target":"192.168.1.100","port":443}' \
   -expiration 72h \
   -output exploit.approved
 ```
 
-**Expiration**: Default `72h` (3 days). Signed with arguments, cannot be tampered. Examples: `24h`, `168h` (1 week), `30m`.
+**Argument Encryption**: Arguments are encrypted with the pentester's public key (ECDH + AES-256-GCM) before signing, ensuring only the pentester can read them. The client signs the encrypted arguments along with the encrypted payload hash and expiration.
+
+**Expiration**: Default `72h` (3 days). Signed with encrypted arguments, cannot be tampered. Examples: `24h`, `168h` (1 week), `30m`.
 
 ### 5. Execute Exploit
 
@@ -382,9 +385,10 @@ All commands log cryptographic operations to stderr for audit trails and securit
 
 2. **Signing Arguments** (Client):
    - Set expiration (default: 3 days)
+   - Encrypt execution arguments with pentester's public key (ECDH + AES-256-GCM)
    - Hash encrypted payload
-   - Sign encrypted payload hash + expiration + execution arguments (ECDSA)
-   - Append version, signature, expiration, arguments to encrypted file
+   - Sign encrypted payload hash + expiration + encrypted arguments (ECDSA)
+   - Append version, signature, expiration, encrypted arguments to encrypted file
 
 3. **Verification & Execution** (Pentester):
    - Read version field (must be 1)
@@ -421,8 +425,8 @@ The encrypted exploit file format (after client signing) is:
 | `client_sig_len` | 4 bytes | Big-endian uint32: length of client signature in bytes |
 | `client_sig` | variable | ASN.1 DER-encoded ECDSA signature (R, S values) |
 | `expiration` | 8 bytes | Big-endian uint64: Unix timestamp (seconds) when payload expires |
-| `args_len` | 4 bytes | Big-endian uint32: length of arguments JSON in bytes |
-| `args_json` | variable | JSON object containing execution arguments |
+| `args_len` | 4 bytes | Big-endian uint32: length of encrypted arguments in bytes |
+| `encrypted_args` | variable | Encrypted arguments (ECDH + AES-256-GCM format: [ephemeral_public_key:65][nonce:12][ciphertext+tag]) |
 
 #### Principal Signature Format
 
@@ -675,10 +679,11 @@ plugin, err := plugin.LoadPlugin(payload)
   -principal-keystore-key "principal-key" \
   -output exploit.encrypted
 
-# Client signs execution arguments
+# Client signs execution arguments (arguments are encrypted with pentester's public key)
 ./bin/sign \
   -file exploit.encrypted \
   -client-keystore-key "client-key" \
+  -pentester-key pentester_public.pem \
   -args '{"target":"192.168.1.100","port":443}' \
   -expiration 72h \
   -output exploit.approved
