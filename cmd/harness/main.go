@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/joncooperworks/harness/crypto"
 	"github.com/joncooperworks/harness/plugin"
@@ -64,6 +67,17 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error verifying and decrypting: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Calculate hash of decrypted exploit binary for logging
+	exploitHash := sha256.Sum256(result.Payload.Data)
+	exploitHashHex := hex.EncodeToString(exploitHash[:])
+
+	// Log execution details
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] %s\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Plugin Type: %s\n", result.Payload.Type.String())
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Plugin Name: %s\n", result.Payload.Name)
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Exploit Binary Hash (SHA256): %s\n", exploitHashHex)
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Execution Arguments: %s\n", string(result.Args))
 
 	// Load plugin
 	plg, err := plugin.LoadPlugin(result.Payload)

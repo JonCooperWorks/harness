@@ -45,10 +45,12 @@ For offensive security teams and penetration testers who need to:
 ### Why WASM Sandboxing?
 
 - Deterministic, reproducible execution across platforms
-- Isolated execution prevents host system impact
-- No filesystem exposure without explicit host function grants
+- Provides isolation boundaries to reduce host system impact
+- Limited filesystem exposure (subject to host function grants)
 - Controlled syscalls (only explicitly granted host functions)
-- Memory safety prevents buffer overflows and memory corruption
+- Memory safety helps prevent buffer overflows and memory corruption
+
+**Note**: WASM sandboxing provides security boundaries but is not a perfect isolation mechanism. Vulnerabilities in the WASM runtime, host function implementations, or the underlying system can still pose risks. Always run exploits on isolated, monitored systems.
 
 ## Workflow
 
@@ -170,7 +172,7 @@ The registry is thread-safe and implementations register themselves automaticall
 
 - **Cryptographic Security**: ECDSA signatures, AES-256-GCM encryption
 - **Cross-Platform**: macOS, Linux, Windows
-- **WASM Sandboxing**: Isolated execution via Extism SDK
+- **WASM Sandboxing**: Execution isolation via Extism SDK (provides security boundaries, not perfect isolation)
 - **OS Keystore Integration**: Private keys never written to disk
 - **Memory-Based Loading**: Exploits loaded directly from memory
 - **Dual-Authorization**: Requires principal encryption + client signature
@@ -255,7 +257,7 @@ See [Plugin API](#plugin-api) section for details.
 
 **Execution requires all three:**
 - ✓ Exploit encrypted with pentester's public key
-- ✓ Valid client signature on expiration + execution arguments
+- ✓ Valid client signature on encrypted payload hash + expiration + execution arguments
 - ✓ Expiration has not passed
 
 Arguments are automatically extracted from approved package (signed by client). Cannot override or change arguments.
@@ -298,14 +300,18 @@ Arguments are automatically extracted from approved package (signed by client). 
 
 2. **Signing Arguments** (Client):
    - Set expiration (default: 3 days)
-   - Sign expiration + execution arguments (ECDSA)
-   - Append signature, expiration, arguments to encrypted file
+   - Hash encrypted payload
+   - Sign encrypted payload hash + expiration + execution arguments (ECDSA)
+   - Append version, signature, expiration, arguments to encrypted file
 
 3. **Verification & Execution** (Pentester):
+   - Read version field (must be 1)
    - Verify expiration not passed
-   - Verify client signature on expiration + arguments
+   - Hash encrypted payload
+   - Verify client signature on encrypted payload hash + expiration + arguments
    - Decrypt symmetric key with private key (ECDH)
    - Decrypt exploit data with symmetric key (AES-256-GCM)
+   - Log execution details (args, exploit hash)
    - Load WASM directly into sandbox
    - Execute with signed arguments
 
@@ -314,13 +320,14 @@ Arguments are automatically extracted from approved package (signed by client). 
 The encrypted exploit file format (after client signing) is:
 
 ```
-[metadata_length:4 bytes][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4 bytes][client_sig][expiration:8 bytes][args_len:4 bytes][args_json]
+[version:1 byte][metadata_length:4 bytes][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4 bytes][client_sig][expiration:8 bytes][args_len:4 bytes][args_json]
 ```
 
 #### File Layout
 
 | Field | Size | Description |
 |-------|------|-------------|
+| `version` | 1 byte | Format version (must be 1). Includes encrypted payload hash in signature. |
 | `metadata_length` | 4 bytes | Big-endian uint32: length of metadata JSON in bytes |
 | `metadata` | variable | JSON object containing encryption metadata |
 | `encrypted_symmetric_key` | variable | Encrypted AES-256 symmetric key (see format below) |
@@ -335,9 +342,9 @@ The encrypted exploit file format (after client signing) is:
 
 - **Algorithm**: ECDSA with P-256 curve
 - **Encoding**: ASN.1 DER format
-- **Signed Data**: SHA-256 hash of `expiration (8 bytes) || args_json`
-- **Purpose**: Ensures authenticity and integrity of the execution arguments and expiration
-- **Authorization**: Proves client has reviewed and approved the specific targeting parameters and expiration time
+- **Signed Data**: SHA-256 hash of `SHA256(encrypted_payload) (32 bytes) || expiration (8 bytes) || args_json`
+- **Purpose**: Ensures authenticity and integrity of the encrypted payload, execution arguments, and expiration
+- **Authorization**: Proves client has reviewed and approved the specific exploit payload, targeting parameters, and expiration time
 
 #### Metadata Format (JSON)
 
@@ -615,7 +622,7 @@ Helps meet compliance requirements:
 - Non-repudiable proof both parties approved execution
 - Cryptographic enforcement prevents unauthorized execution
 - Verifiable audit trails (signatures and keystore access logs)
-- Sandboxed execution (WASM isolation)
+- Sandboxed execution (WASM isolation boundaries)
 
 ## Security Considerations
 
@@ -624,4 +631,4 @@ Helps meet compliance requirements:
 - Encrypted exploits can be distributed over insecure channels
 - Client signature verification ensures arguments + expiration approval
 - Encryption ensures exploit confidentiality
-- WASM sandboxing prevents host system impact
+- WASM sandboxing provides isolation boundaries to reduce host system impact

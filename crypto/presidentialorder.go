@@ -111,7 +111,7 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 
 	// Parse from the end: read client signature, expiration, and args
 	// File format (as written by sign command):
-	// [encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
+	// [version:1 byte][encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
 	//
 	// Working backwards from the end:
 	// - args_json is the last N bytes (where N = args_len)
@@ -119,10 +119,17 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	// - expiration is 8 bytes before args_len
 	// - signature ends right before expiration
 	// - sig_len is 4 bytes before signature starts
+	// - version is 1 byte at the start (must be 1)
 
-	if len(fileData) < 20 {
+	if len(fileData) < 21 {
 		return nil, errors.New("file too short")
 	}
+
+	// Read version field (first byte, must be 1)
+	if fileData[0] != 1 {
+		return nil, fmt.Errorf("unsupported file format version: %d (expected 1)", fileData[0])
+	}
+	encryptedPayloadStart := 1
 
 	// Step 1: Read args_len from the last 4 bytes
 	// But wait - args_len tells us how long args_json is, and args_json comes AFTER args_len
@@ -244,11 +251,17 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	clientSignature := fileData[sigPos : sigPos+clientSigLen]
 	offset := sigLenPos
 
-	// Verify client signature on expiration + arguments
-	// Signature covers: expiration (8 bytes) + args_json
-	dataToVerify := make([]byte, 8+len(fileArgsJSON))
-	binary.BigEndian.PutUint64(dataToVerify[0:8], uint64(expirationUnix))
-	copy(dataToVerify[8:], fileArgsJSON)
+	// Extract encrypted payload (everything before client signature, after version if present)
+	encryptedPayload := fileData[encryptedPayloadStart:offset]
+
+	// Hash the encrypted payload
+	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
+
+	// Verify client signature: Signature covers encrypted_payload_hash (32 bytes) + expiration (8 bytes) + args_json
+	dataToVerify := make([]byte, 32+8+len(fileArgsJSON))
+	copy(dataToVerify[0:32], encryptedPayloadHash[:])
+	binary.BigEndian.PutUint64(dataToVerify[32:40], uint64(expirationUnix))
+	copy(dataToVerify[40:], fileArgsJSON)
 
 	dataHash := sha256.Sum256(dataToVerify)
 	var sig struct {
@@ -258,11 +271,8 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, fmt.Errorf("failed to unmarshal client signature: %w", err)
 	}
 	if !ecdsa.Verify(po.clientPubKey, dataHash[:], sig.R, sig.S) {
-		return nil, errors.New("client signature verification failed")
+		return nil, errors.New("client signature verification failed (signature must cover encrypted payload hash, expiration, and arguments)")
 	}
-
-	// Now parse encrypted payload (everything before client signature)
-	encryptedPayload := fileData[:offset]
 	if len(encryptedPayload) < 4 {
 		return nil, errors.New("encrypted payload too short")
 	}

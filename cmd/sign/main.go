@@ -66,23 +66,30 @@ func main() {
 	expirationTime := time.Now().Add(*expirationDur)
 	expirationUnix := expirationTime.Unix()
 
-	// Sign expiration + arguments together using keystore (key never leaves secure storage)
+	// Hash the encrypted payload to include in signature
+	encryptedPayloadHash := sha256.Sum256(encryptedData)
+
+	// Sign encrypted payload hash + expiration + arguments together using keystore (key never leaves secure storage)
 	argsBytes := []byte(*argsJSON)
-	// Create data to sign: expiration (8 bytes) + args_json
-	dataToSign := make([]byte, 8+len(argsBytes))
-	binary.BigEndian.PutUint64(dataToSign[0:8], uint64(expirationUnix))
-	copy(dataToSign[8:], argsBytes)
+	// Create data to sign: encrypted_payload_hash (32 bytes) + expiration (8 bytes) + args_json
+	dataToSign := make([]byte, 32+8+len(argsBytes))
+	copy(dataToSign[0:32], encryptedPayloadHash[:])
+	binary.BigEndian.PutUint64(dataToSign[32:40], uint64(expirationUnix))
+	copy(dataToSign[40:], argsBytes)
 
 	hash := sha256.Sum256(dataToSign)
 	signature, err := ks.Sign(*clientKeyID, hash[:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error signing arguments: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error signing payload and arguments: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Build final approved file structure:
-	// [encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
+	// [version:1][encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
 	var output []byte
+
+	// Write version (1 byte, version 1)
+	output = append(output, byte(1))
 
 	// Write encrypted payload (already in correct format)
 	output = append(output, encryptedData...)
