@@ -262,6 +262,68 @@ See [Plugin API](#plugin-api) section for details.
 
 Arguments are automatically extracted from approved package (signed by client). Cannot override or change arguments.
 
+## Execution Logging
+
+All commands log cryptographic operations to stderr for audit trails and security analysis. Logs are prefixed with command-specific tags and include SHA256 hashes of critical data.
+
+### Encryption Logs (`cmd/encrypt`)
+
+```
+[ENCRYPTION LOG] <timestamp>
+[ENCRYPTION LOG] Plaintext Exploit Hash (SHA256): <hash>
+[ENCRYPTION LOG] Pentester Public Key Hash (SHA256): <hash>
+```
+
+- **Plaintext Exploit Hash**: SHA256 of the original exploit binary before encryption
+- **Pentester Public Key Hash**: SHA256 of the pentester's public key used for encryption
+
+### Signing Logs (`cmd/sign`)
+
+```
+[SIGNING LOG] <timestamp>
+[SIGNING LOG] Encrypted Payload Hash (SHA256): <hash>
+[SIGNING LOG] Client Public Key Hash (SHA256): <hash>
+```
+
+- **Encrypted Payload Hash**: SHA256 of the encrypted payload being signed
+- **Client Public Key Hash**: SHA256 of the client's public key used for signing
+
+### Verification Logs (`cmd/verify`)
+
+```
+[VERIFICATION LOG] <timestamp>
+[VERIFICATION LOG] Encrypted Payload Hash (SHA256): <hash>
+[VERIFICATION LOG] Client Signature Hash (SHA256): <hash>
+[VERIFICATION LOG] Client Public Key Hash (SHA256): <hash>
+[VERIFICATION LOG] Pentester Public Key Hash (SHA256): <hash>
+```
+
+- **Encrypted Payload Hash**: SHA256 of the encrypted payload that was verified
+- **Client Signature Hash**: SHA256 of the ASN.1 DER-encoded client signature
+- **Client Public Key Hash**: SHA256 of the client's public key used for verification
+- **Pentester Public Key Hash**: SHA256 of the pentester's public key used for decryption
+
+### Execution Logs (`cmd/harness`)
+
+```
+[EXECUTION LOG] <timestamp>
+[EXECUTION LOG] Plugin Type: <type>
+[EXECUTION LOG] Plugin Name: <name>
+[EXECUTION LOG] Exploit Binary Hash (SHA256): <hash>
+[EXECUTION LOG] Execution Arguments: <args>
+[EXECUTION LOG] Client Signature Hash (SHA256): <hash>
+[EXECUTION LOG] Client Public Key Hash (SHA256): <hash>
+[EXECUTION LOG] Pentester Public Key Hash (SHA256): <hash>
+```
+
+- **Exploit Binary Hash**: SHA256 of the decrypted exploit binary that was executed
+- **Execution Arguments**: The JSON arguments that were executed with
+- **Client Signature Hash**: SHA256 of the verified client signature
+- **Client Public Key Hash**: SHA256 of the client's public key used for verification
+- **Pentester Public Key Hash**: SHA256 of the pentester's public key used for decryption
+
+**Note**: All logs are written to stderr, so they won't interfere with JSON output on stdout. This provides a complete audit trail of cryptographic operations, key usage, and execution details for compliance and security analysis.
+
 ## OS Keystore Integration
 
 **All private keys stored in OS keystore, never written to disk.**

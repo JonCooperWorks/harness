@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/joncooperworks/harness/crypto"
+	"github.com/joncooperworks/harness/crypto/keystore"
 	"github.com/joncooperworks/harness/plugin"
 )
 
@@ -47,6 +48,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Get pentester's public key from keystore for logging
+	ks, err := keystore.NewKeystore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
+		os.Exit(1)
+	}
+	pentesterPubKey, err := ks.GetPublicKey(*keystoreKeyID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting pentester's public key: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Create PresidentialOrder from keystore
 	po, err := crypto.NewPresidentialOrderFromKeystore(*keystoreKeyID, signaturePubKey)
 	if err != nil {
@@ -72,12 +85,37 @@ func main() {
 	exploitHash := sha256.Sum256(result.Payload.Data)
 	exploitHashHex := hex.EncodeToString(exploitHash[:])
 
+	// Calculate hash of client signature
+	signatureHash := sha256.Sum256(result.ClientSignature)
+	signatureHashHex := hex.EncodeToString(signatureHash[:])
+
+	// Calculate hash of client public key
+	clientPubKeyBytes, err := x509.MarshalPKIXPublicKey(signaturePubKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling client public key: %v\n", err)
+		os.Exit(1)
+	}
+	clientPubKeyHash := sha256.Sum256(clientPubKeyBytes)
+	clientPubKeyHashHex := hex.EncodeToString(clientPubKeyHash[:])
+
+	// Calculate hash of pentester public key
+	pentesterPubKeyBytes, err := x509.MarshalPKIXPublicKey(pentesterPubKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling pentester public key: %v\n", err)
+		os.Exit(1)
+	}
+	pentesterPubKeyHash := sha256.Sum256(pentesterPubKeyBytes)
+	pentesterPubKeyHashHex := hex.EncodeToString(pentesterPubKeyHash[:])
+
 	// Log execution details
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] %s\n", time.Now().Format(time.RFC3339))
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Plugin Type: %s\n", result.Payload.Type.String())
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Plugin Name: %s\n", result.Payload.Name)
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Exploit Binary Hash (SHA256): %s\n", exploitHashHex)
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Execution Arguments: %s\n", string(result.Args))
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Client Signature Hash (SHA256): %s\n", signatureHashHex)
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Client Public Key Hash (SHA256): %s\n", clientPubKeyHashHex)
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Pentester Public Key Hash (SHA256): %s\n", pentesterPubKeyHashHex)
 
 	// Load plugin
 	plg, err := plugin.LoadPlugin(result.Payload)

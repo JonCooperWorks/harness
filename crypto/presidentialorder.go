@@ -21,8 +21,9 @@ import (
 
 // DecryptedResult contains both the decrypted payload and the execution arguments
 type DecryptedResult struct {
-	Payload *Payload
-	Args    []byte // JSON arguments extracted from the file
+	Payload         *Payload
+	Args            []byte // JSON arguments extracted from the file
+	ClientSignature []byte // Client signature from the file
 }
 
 // PresidentialOrder interface for verifying signatures and decrypting payloads
@@ -344,8 +345,9 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	}
 
 	return &DecryptedResult{
-		Payload: &payload,
-		Args:    fileArgsJSON,
+		Payload:         &payload,
+		Args:            fileArgsJSON,
+		ClientSignature: clientSignature,
 	}, nil
 }
 

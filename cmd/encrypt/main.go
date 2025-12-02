@@ -8,11 +8,13 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/joncooperworks/harness/crypto"
 )
@@ -51,6 +53,24 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error reading plugin file: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Calculate hash of plaintext exploit for logging
+	plaintextHash := sha256.Sum256(pluginData)
+	plaintextHashHex := hex.EncodeToString(plaintextHash[:])
+
+	// Calculate hash of pentester's public key for logging
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling public key: %v\n", err)
+		os.Exit(1)
+	}
+	pubKeyHash := sha256.Sum256(pubKeyBytes)
+	pubKeyHashHex := hex.EncodeToString(pubKeyHash[:])
+
+	// Log encryption details
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] %s\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Plaintext Exploit Hash (SHA256): %s\n", plaintextHashHex)
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Pentester Public Key Hash (SHA256): %s\n", pubKeyHashHex)
 
 	// Create payload (type is now a string identifier)
 	payload := crypto.Payload{

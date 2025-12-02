@@ -2,7 +2,9 @@ package main
 
 import (
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -68,6 +70,26 @@ func main() {
 
 	// Hash the encrypted payload to include in signature
 	encryptedPayloadHash := sha256.Sum256(encryptedData)
+	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
+
+	// Get client public key for logging
+	clientPubKey, err := ks.GetPublicKey(*clientKeyID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting client public key: %v\n", err)
+		os.Exit(1)
+	}
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(clientPubKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling public key: %v\n", err)
+		os.Exit(1)
+	}
+	pubKeyHash := sha256.Sum256(pubKeyBytes)
+	pubKeyHashHex := hex.EncodeToString(pubKeyHash[:])
+
+	// Log signing details
+	fmt.Fprintf(os.Stderr, "[SIGNING LOG] %s\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(os.Stderr, "[SIGNING LOG] Encrypted Payload Hash (SHA256): %s\n", encryptedPayloadHashHex)
+	fmt.Fprintf(os.Stderr, "[SIGNING LOG] Client Public Key Hash (SHA256): %s\n", pubKeyHashHex)
 
 	// Sign encrypted payload hash + expiration + arguments together using keystore (key never leaves secure storage)
 	argsBytes := []byte(*argsJSON)
