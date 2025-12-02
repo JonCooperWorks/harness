@@ -668,7 +668,7 @@ Extism PDK provides:
 ### Example Exploit (Rust)
 
 ```rust
-use extism_pdk::*;x
+use extism_pdk::*;
 use serde_json::Value;
 
 #[plugin_fn]
