@@ -3,23 +3,26 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/joncooperworks/harness/crypto/keystore"
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
 	flag.Parse()
 
 	ks, err := keystore.NewKeystore()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
+		logger.Error("failed to create keystore", "error", err)
 		os.Exit(1)
 	}
 
 	keys, err := ks.ListKeys()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error listing keys: %v\n", err)
+		logger.Error("failed to list keys", "error", err)
 		os.Exit(1)
 	}
 

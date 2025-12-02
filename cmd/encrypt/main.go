@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -19,6 +20,8 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
 	var (
 		pluginFile         = flag.String("plugin", "", "Path to plugin file to encrypt")
 		pluginType         = flag.String("type", "wasm", "Plugin type: wasm")
@@ -29,17 +32,17 @@ func main() {
 	flag.Parse()
 
 	if *pluginFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -plugin is required\n")
+		logger.Error("missing required flag", "flag", "plugin")
 		os.Exit(1)
 	}
 
 	if *harnessPubKeyPath == "" {
-		fmt.Fprintf(os.Stderr, "Error: -harness-key is required (harness public key for encrypting exploit)\n")
+		logger.Error("missing required flag", "flag", "harness-key", "message", "harness public key for encrypting exploit")
 		os.Exit(1)
 	}
 
 	if *exploitKeystoreKey == "" {
-		fmt.Fprintf(os.Stderr, "Error: -exploit-keystore-key is required (exploit owner's private key for signing encrypted payload)\n")
+		logger.Error("missing required flag", "flag", "exploit-keystore-key", "message", "exploit owner's private key for signing encrypted payload")
 		os.Exit(1)
 	}
 
@@ -47,21 +50,21 @@ func main() {
 	// The exploit is encrypted with the pentester's public key so they can decrypt and execute
 	harnessPubKey, err := loadPublicKey(*harnessPubKeyPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading pentester's public key: %v\n", err)
+		logger.Error("failed to load pentester's public key", "error", err, "file", *harnessPubKeyPath)
 		os.Exit(1)
 	}
 
 	// Load keystore for exploit owner signature
 	ks, err := keystore.NewKeystore()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
+		logger.Error("failed to create keystore", "error", err)
 		os.Exit(1)
 	}
 
 	// Read plugin file to extract name
 	pluginData, err := os.ReadFile(*pluginFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading plugin file: %v\n", err)
+		logger.Error("failed to read plugin file", "error", err, "file", *pluginFile)
 		os.Exit(1)
 	}
 
@@ -73,7 +76,7 @@ func main() {
 	}
 	plg, err := plugin.LoadPlugin(tempPayload)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading plugin: %v\n", err)
+		logger.Error("failed to load plugin", "error", err)
 		os.Exit(1)
 	}
 	pluginName := plg.Name()
@@ -83,7 +86,7 @@ func main() {
 	// Get exploit owner public key for logging
 	exploitPubKey, err := ks.GetPublicKey(*exploitKeystoreKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting exploit owner public key: %v\n", err)
+		logger.Error("failed to get exploit owner public key", "error", err, "key_id", *exploitKeystoreKey)
 		os.Exit(1)
 	}
 
@@ -99,7 +102,7 @@ func main() {
 
 	result, err := crypto.EncryptPlugin(encryptReq)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error encrypting plugin: %v\n", err)
+		logger.Error("failed to encrypt plugin", "error", err)
 		os.Exit(1)
 	}
 
@@ -108,12 +111,12 @@ func main() {
 	// Format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig]...
 	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
 	if len(result.EncryptedData) < headerSize+4 {
-		fmt.Fprintf(os.Stderr, "Error: encrypted data too short\n")
+		logger.Error("encrypted data too short", "size", len(result.EncryptedData), "min_size", headerSize+4)
 		os.Exit(1)
 	}
 	exploitSigLen := int(binary.BigEndian.Uint32(result.EncryptedData[headerSize : headerSize+4]))
 	if len(result.EncryptedData) < headerSize+4+exploitSigLen {
-		fmt.Fprintf(os.Stderr, "Error: encrypted data too short for exploit owner signature\n")
+		logger.Error("encrypted data too short for exploit owner signature", "size", len(result.EncryptedData), "min_size", headerSize+4+exploitSigLen)
 		os.Exit(1)
 	}
 	exploitSignature := result.EncryptedData[headerSize+4 : headerSize+4+exploitSigLen]
@@ -123,7 +126,7 @@ func main() {
 	// Calculate hash of exploit owner public key for logging
 	exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(exploitPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling exploit owner public key: %v\n", err)
+		logger.Error("failed to marshal exploit owner public key", "error", err)
 		os.Exit(1)
 	}
 	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
@@ -132,23 +135,25 @@ func main() {
 	// Calculate hash of harness public key for logging
 	harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling harness public key: %v\n", err)
+		logger.Error("failed to marshal harness public key", "error", err)
 		os.Exit(1)
 	}
 	harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
 	harnessPubKeyHashHex := hex.EncodeToString(harnessPubKeyHash[:])
 
 	// Log encryption details
-	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] %s\n", time.Now().Format(time.RFC3339))
-	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Exploit Owner Signature Hash (SHA256): %s\n", exploitSigHashHex)
-	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Exploit Owner Public Key Hash (SHA256): %s\n", exploitPubKeyHashHex)
-	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Harness Public Key Hash (SHA256): %s\n", harnessPubKeyHashHex)
+	logger.Info("encryption log",
+		"timestamp", time.Now().Format(time.RFC3339),
+		"exploit_owner_signature_hash_sha256", exploitSigHashHex,
+		"exploit_owner_public_key_hash_sha256", exploitPubKeyHashHex,
+		"harness_public_key_hash_sha256", harnessPubKeyHashHex,
+	)
 
 	output := result.EncryptedData
 
 	// Write to file
 	if err := os.WriteFile(*outputPath, output, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing encrypted file: %v\n", err)
+		logger.Error("failed to write encrypted file", "error", err, "path", *outputPath)
 		os.Exit(1)
 	}
 

@@ -8,12 +8,15 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/joncooperworks/harness/crypto/keystore"
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
 	var (
 		publicKeyPath = flag.String("public", "public.pem", "Path to save public key")
 		keystoreKeyID = flag.String("keystore-key", "", "Key ID to store private key in OS keystore (required)")
@@ -22,7 +25,7 @@ func main() {
 	flag.Parse()
 
 	if *keystoreKeyID == "" {
-		fmt.Fprintf(os.Stderr, "Error: -keystore-key is required\n")
+		logger.Error("missing required flag", "flag", "keystore-key")
 		os.Exit(1)
 	}
 
@@ -33,14 +36,14 @@ func main() {
 		// Import existing private key from file
 		privateKey, err = loadPrivateKey(*importKeyPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading private key: %v\n", err)
+			logger.Error("failed to load private key", "error", err, "file", *importKeyPath)
 			os.Exit(1)
 		}
 	} else {
 		// Generate new ECDSA key pair
 		privateKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error generating key: %v\n", err)
+			logger.Error("failed to generate key", "error", err)
 			os.Exit(1)
 		}
 	}
@@ -48,19 +51,19 @@ func main() {
 	// Store private key directly in keystore (never write to disk)
 	ks, err := keystore.NewKeystore()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
+		logger.Error("failed to create keystore", "error", err)
 		os.Exit(1)
 	}
 
 	if err := ks.SetPrivateKey(*keystoreKeyID, privateKey); err != nil {
-		fmt.Fprintf(os.Stderr, "Error storing key in keystore: %v\n", err)
+		logger.Error("failed to store key in keystore", "error", err, "key_id", *keystoreKeyID)
 		os.Exit(1)
 	}
 
 	// Encode and write public key only
 	publicKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling public key: %v\n", err)
+		logger.Error("failed to marshal public key", "error", err)
 		os.Exit(1)
 	}
 
@@ -70,7 +73,7 @@ func main() {
 	})
 
 	if err := os.WriteFile(*publicKeyPath, publicKeyPEM, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing public key: %v\n", err)
+		logger.Error("failed to write public key", "error", err, "path", *publicKeyPath)
 		os.Exit(1)
 	}
 

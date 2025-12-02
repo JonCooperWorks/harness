@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
 	var (
 		encryptedFile     = flag.String("file", "", "Path to encrypted plugin file (from encrypt command)")
 		targetKeystoreKey = flag.String("target-keystore-key", "", "Key ID in OS keystore for target's private key (required, for signing execution arguments)")
@@ -29,22 +32,22 @@ func main() {
 	flag.Parse()
 
 	if *encryptedFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -file is required\n")
+		logger.Error("missing required flag", "flag", "file")
 		os.Exit(1)
 	}
 
 	if *targetKeystoreKey == "" {
-		fmt.Fprintf(os.Stderr, "Error: -target-keystore-key is required (target's private key for signing execution arguments)\n")
+		logger.Error("missing required flag", "flag", "target-keystore-key", "message", "target's private key for signing execution arguments")
 		os.Exit(1)
 	}
 
 	if *harnessPubKeyFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -harness-key is required (harness public key for encrypting arguments)\n")
+		logger.Error("missing required flag", "flag", "harness-key", "message", "harness public key for encrypting arguments")
 		os.Exit(1)
 	}
 
 	if *argsJSON == "" {
-		fmt.Fprintf(os.Stderr, "Error: -args is required (target must sign execution arguments)\n")
+		logger.Error("missing required flag", "flag", "args", "message", "target must sign execution arguments")
 		os.Exit(1)
 	}
 
@@ -55,21 +58,21 @@ func main() {
 	// Load keystore (keys never leave secure storage)
 	ks, err := keystore.NewKeystore()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
+		logger.Error("failed to create keystore", "error", err)
 		os.Exit(1)
 	}
 
 	// Load harness public key for encrypting arguments
 	harnessPubKey, err := loadPublicKey(*harnessPubKeyFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading harness public key: %v\n", err)
+		logger.Error("failed to load harness public key", "error", err, "file", *harnessPubKeyFile)
 		os.Exit(1)
 	}
 
 	// Open encrypted file
 	encryptedFileHandle, err := os.Open(*encryptedFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening encrypted file: %v\n", err)
+		logger.Error("failed to open encrypted file", "error", err, "file", *encryptedFile)
 		os.Exit(1)
 	}
 	defer encryptedFileHandle.Close()
@@ -89,7 +92,7 @@ func main() {
 
 	result, err := crypto.SignEncryptedPlugin(signReq)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error signing encrypted plugin: %v\n", err)
+		logger.Error("failed to sign encrypted plugin", "error", err)
 		os.Exit(1)
 	}
 
@@ -97,12 +100,12 @@ func main() {
 	// Format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
 	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
 	if len(result.ApprovedData) < headerSize+4 {
-		fmt.Fprintf(os.Stderr, "Error: approved data too short\n")
+		logger.Error("approved data too short", "size", len(result.ApprovedData), "min_size", headerSize+4)
 		os.Exit(1)
 	}
 	principalSigLen := int(binary.BigEndian.Uint32(result.ApprovedData[headerSize : headerSize+4]))
 	if len(result.ApprovedData) < headerSize+4+principalSigLen+4 {
-		fmt.Fprintf(os.Stderr, "Error: approved data too short\n")
+		logger.Error("approved data too short", "size", len(result.ApprovedData), "min_size", headerSize+4+principalSigLen+4)
 		os.Exit(1)
 	}
 	encryptedPayloadStart := headerSize + 4 + principalSigLen
@@ -110,7 +113,7 @@ func main() {
 	// We need to read metadata to find the exact end
 	metadataLen := int(binary.BigEndian.Uint32(result.ApprovedData[encryptedPayloadStart : encryptedPayloadStart+4]))
 	if len(result.ApprovedData) < encryptedPayloadStart+4+metadataLen {
-		fmt.Fprintf(os.Stderr, "Error: approved data too short for metadata\n")
+		logger.Error("approved data too short for metadata", "size", len(result.ApprovedData), "min_size", encryptedPayloadStart+4+metadataLen)
 		os.Exit(1)
 	}
 	metadataStart := encryptedPayloadStart + 4
@@ -120,7 +123,7 @@ func main() {
 		PluginDataLen   int `json:"plugin_data_len"`
 	}
 	if err := json.Unmarshal(result.ApprovedData[metadataStart:metadataEnd], &metadataStruct); err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing metadata: %v\n", err)
+		logger.Error("failed to parse metadata", "error", err)
 		os.Exit(1)
 	}
 	encryptedPayloadEnd := metadataEnd + metadataStruct.SymmetricKeyLen + metadataStruct.PluginDataLen
@@ -131,27 +134,29 @@ func main() {
 	// Get target public key for logging
 	targetPubKey, err := ks.GetPublicKey(*targetKeystoreKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting target public key: %v\n", err)
+		logger.Error("failed to get target public key", "error", err, "key_id", *targetKeystoreKey)
 		os.Exit(1)
 	}
 	targetPubKeyBytes, err := x509.MarshalPKIXPublicKey(targetPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling target public key: %v\n", err)
+		logger.Error("failed to marshal target public key", "error", err)
 		os.Exit(1)
 	}
 	targetPubKeyHash := sha256.Sum256(targetPubKeyBytes)
 	targetPubKeyHashHex := hex.EncodeToString(targetPubKeyHash[:])
 
 	// Log signing details
-	fmt.Fprintf(os.Stderr, "[SIGNING LOG] %s\n", time.Now().Format(time.RFC3339))
-	fmt.Fprintf(os.Stderr, "[SIGNING LOG] Encrypted Payload Hash (SHA256): %s\n", encryptedPayloadHashHex)
-	fmt.Fprintf(os.Stderr, "[SIGNING LOG] Target Public Key Hash (SHA256): %s\n", targetPubKeyHashHex)
+	logger.Info("signing log",
+		"timestamp", time.Now().Format(time.RFC3339),
+		"encrypted_payload_hash_sha256", encryptedPayloadHashHex,
+		"target_public_key_hash_sha256", targetPubKeyHashHex,
+	)
 
 	output := result.ApprovedData
 
 	// Write to file
 	if err := os.WriteFile(*outputPath, output, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing approved file: %v\n", err)
+		logger.Error("failed to write approved file", "error", err, "path", *outputPath)
 		os.Exit(1)
 	}
 

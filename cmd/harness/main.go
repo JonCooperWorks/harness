@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -20,6 +21,8 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
 	var (
 		encryptedFile      = flag.String("file", "", "Path to approved plugin file (with target signature)")
 		harnessKeystoreKey = flag.String("harness-keystore-key", "", "Key ID in OS keystore for harness (pentester) private key (required, for decryption)")
@@ -29,62 +32,62 @@ func main() {
 	flag.Parse()
 
 	if *encryptedFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -file is required\n")
+		logger.Error("missing required flag", "flag", "file")
 		os.Exit(1)
 	}
 
 	if *harnessKeystoreKey == "" {
-		fmt.Fprintf(os.Stderr, "Error: -harness-keystore-key is required (harness private key must be stored in OS keystore)\n")
+		logger.Error("missing required flag", "flag", "harness-keystore-key", "message", "harness private key must be stored in OS keystore")
 		os.Exit(1)
 	}
 
 	if *targetPubKeyFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -target-key is required (target's public key for verifying argument signature)\n")
+		logger.Error("missing required flag", "flag", "target-key", "message", "target's public key for verifying argument signature")
 		os.Exit(1)
 	}
 
 	if *exploitPubKeyFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -exploit-key is required (exploit owner's public key for verifying payload signature)\n")
+		logger.Error("missing required flag", "flag", "exploit-key", "message", "exploit owner's public key for verifying payload signature")
 		os.Exit(1)
 	}
 
 	// Load target's public key for signature verification
 	targetPubKey, err := loadPublicKey(*targetPubKeyFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading target's public key: %v\n", err)
+		logger.Error("failed to load target's public key", "error", err, "file", *targetPubKeyFile)
 		os.Exit(1)
 	}
 
 	// Load exploit owner's public key (required)
 	exploitPubKey, err := loadPublicKey(*exploitPubKeyFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading exploit owner's public key: %v\n", err)
+		logger.Error("failed to load exploit owner's public key", "error", err, "file", *exploitPubKeyFile)
 		os.Exit(1)
 	}
 
 	// Get harness public key from keystore for logging
 	ks, err := keystore.NewKeystore()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
+		logger.Error("failed to create keystore", "error", err)
 		os.Exit(1)
 	}
 	harnessPubKey, err := ks.GetPublicKey(*harnessKeystoreKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting harness public key: %v\n", err)
+		logger.Error("failed to get harness public key", "error", err, "key_id", *harnessKeystoreKey)
 		os.Exit(1)
 	}
 
 	// Create PresidentialOrder from keystore
 	po, err := crypto.NewPresidentialOrderFromKeystoreWithPrincipal(*harnessKeystoreKey, targetPubKey, exploitPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating PresidentialOrder from keystore: %v\n", err)
+		logger.Error("failed to create PresidentialOrder from keystore", "error", err)
 		os.Exit(1)
 	}
 
 	// Load approved file (contains encrypted payload + client signature + args)
 	fileData, err := os.ReadFile(*encryptedFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading approved file: %v\n", err)
+		logger.Error("failed to read approved file", "error", err, "file", *encryptedFile)
 		os.Exit(1)
 	}
 
@@ -92,7 +95,7 @@ func main() {
 	// VerifyAndDecrypt handles all parsing deterministically
 	result, err := po.VerifyAndDecrypt(fileData)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error verifying and decrypting: %v\n", err)
+		logger.Error("failed to verify and decrypt", "error", err)
 		os.Exit(1)
 	}
 
@@ -107,7 +110,7 @@ func main() {
 	// Calculate hash of target public key
 	targetPubKeyBytes, err := x509.MarshalPKIXPublicKey(targetPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling target public key: %v\n", err)
+		logger.Error("failed to marshal target public key", "error", err)
 		os.Exit(1)
 	}
 	targetPubKeyHash := sha256.Sum256(targetPubKeyBytes)
@@ -116,7 +119,7 @@ func main() {
 	// Calculate hash of harness public key
 	harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling harness public key: %v\n", err)
+		logger.Error("failed to marshal harness public key", "error", err)
 		os.Exit(1)
 	}
 	harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
@@ -129,7 +132,7 @@ func main() {
 	// Calculate hash of exploit owner public key
 	exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(exploitPubKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling exploit owner public key: %v\n", err)
+		logger.Error("failed to marshal exploit owner public key", "error", err)
 		os.Exit(1)
 	}
 	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
@@ -139,12 +142,12 @@ func main() {
 	// Extract encrypted payload: skip header(10) + principal_sig_len(4) + principal_sig, then read metadata_len(4) + metadata + encrypted data
 	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
 	if len(fileData) < headerSize+4 {
-		fmt.Fprintf(os.Stderr, "Error: file too short\n")
+		logger.Error("file too short", "size", len(fileData), "min_size", headerSize+4)
 		os.Exit(1)
 	}
 	principalSigLen := int(binary.BigEndian.Uint32(fileData[headerSize : headerSize+4]))
 	if len(fileData) < headerSize+4+principalSigLen+4 {
-		fmt.Fprintf(os.Stderr, "Error: file too short\n")
+		logger.Error("file too short", "size", len(fileData), "min_size", headerSize+4+principalSigLen+4)
 		os.Exit(1)
 	}
 	encryptedPayloadStart := headerSize + 4 + principalSigLen
@@ -157,28 +160,30 @@ func main() {
 	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
 
 	// Log execution details
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] %s\n", time.Now().Format(time.RFC3339))
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Encrypted Payload Hash (SHA256): %s\n", encryptedPayloadHashHex)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Plugin Type: %s\n", result.Payload.Type.String())
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Plugin Name: %s\n", result.Payload.Name)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Exploit Binary Hash (SHA256): %s\n", exploitHashHex)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Exploit Owner Signature Hash (SHA256): %s\n", exploitSigHashHex)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Exploit Owner Public Key Hash (SHA256): %s\n", exploitPubKeyHashHex)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Target Signature Hash (SHA256): %s\n", targetSigHashHex)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Target Public Key Hash (SHA256): %s\n", targetPubKeyHashHex)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Harness Public Key Hash (SHA256): %s\n", harnessPubKeyHashHex)
+	logger.Info("execution log",
+		"timestamp", time.Now().Format(time.RFC3339),
+		"encrypted_payload_hash_sha256", encryptedPayloadHashHex,
+		"plugin_type", result.Payload.Type.String(),
+		"plugin_name", result.Payload.Name,
+		"exploit_binary_hash_sha256", exploitHashHex,
+		"exploit_owner_signature_hash_sha256", exploitSigHashHex,
+		"exploit_owner_public_key_hash_sha256", exploitPubKeyHashHex,
+		"target_signature_hash_sha256", targetSigHashHex,
+		"target_public_key_hash_sha256", targetPubKeyHashHex,
+		"harness_public_key_hash_sha256", harnessPubKeyHashHex,
+	)
 
 	// Load plugin
 	plg, err := plugin.LoadPlugin(result.Payload)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading plugin: %v\n", err)
+		logger.Error("failed to load plugin", "error", err)
 		os.Exit(1)
 	}
 
 	// Use arguments from the package (extracted from the file)
 	var args json.RawMessage
 	if err := json.Unmarshal(result.Args, &args); err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing arguments JSON: %v\n", err)
+		logger.Error("failed to parse arguments JSON", "error", err)
 		os.Exit(1)
 	}
 
@@ -186,14 +191,14 @@ func main() {
 	ctx := context.Background()
 	execResult, err := plg.Execute(ctx, args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error executing plugin: %v\n", err)
+		logger.Error("failed to execute plugin", "error", err)
 		os.Exit(1)
 	}
 
 	// Print result
 	resultJSON, err := json.MarshalIndent(execResult, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling result: %v\n", err)
+		logger.Error("failed to marshal result", "error", err)
 		os.Exit(1)
 	}
 
