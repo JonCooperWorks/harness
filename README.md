@@ -107,6 +107,65 @@ type Keystore interface {
 - **Linux**: libsecret/keyring (extensible to TPM/cloud KMS)
 - **Windows**: Credential Manager (extensible to TPM/Windows Key Storage Provider)
 
+### Adding New Keystore Implementations
+
+Harness uses a **registry pattern** for keystore implementations, allowing you to add support for new platforms or keystore backends without modifying core code.
+
+**Steps to add a new keystore:**
+
+1. **Implement the `Keystore` interface** in a new file (e.g., `crypto/keystore/cloudkms.go`):
+
+```go
+package keystore
+
+import "crypto/ecdsa"
+
+// CloudKMSKeystore implements Keystore for cloud KMS
+type CloudKMSKeystore struct {
+    // ... your implementation fields
+}
+
+// NewCloudKMSKeystore creates a new cloud KMS keystore
+func NewCloudKMSKeystore() (Keystore, error) {
+    // ... initialization logic
+    return &CloudKMSKeystore{}, nil
+}
+
+// Implement all Keystore interface methods...
+func (k *CloudKMSKeystore) GetPublicKey(keyID string) (*ecdsa.PublicKey, error) { ... }
+func (k *CloudKMSKeystore) Sign(keyID string, hash []byte) ([]byte, error) { ... }
+// ... etc
+```
+
+2. **Register the implementation** in an `init()` function:
+
+```go
+func init() {
+    RegisterKeystore("cloudkms", NewCloudKMSKeystore)
+    // Or register for a specific platform:
+    RegisterKeystore("linux", NewCloudKMSKeystore) // Override default Linux keystore
+}
+```
+
+3. **Use the registry** - The factory automatically uses registered implementations:
+
+```go
+// In factory.go, NewKeystore() automatically looks up the registered factory
+// for runtime.GOOS, or you can manually get a factory:
+factory, err := GetKeystoreFactory("cloudkms")
+if err != nil {
+    return nil, err
+}
+keystore, err := factory()
+```
+
+**Registry API:**
+- `RegisterKeystore(platform string, factory KeystoreFactory)` - Register a keystore factory
+- `GetKeystoreFactory(platform string) (KeystoreFactory, error)` - Get a factory by platform
+- `ListRegisteredPlatforms() []string` - List all registered platforms
+
+The registry is thread-safe and implementations register themselves automatically when imported.
+
 ## Features
 
 - **Cryptographic Security**: ECDSA signatures, AES-256-GCM encryption
@@ -340,7 +399,7 @@ The exploit payload is encrypted using AES-256-GCM:
 }
 ```
 
-- `type`: Exploit type (0 = WASM)
+- `type`: Exploit type identifier (string, e.g., "wasm", "python")
 - `name`: Exploit name identifier
 - `data`: Base64-encoded exploit binary data (e.g., WASM module). Go's `encoding/json` automatically base64-encodes `[]byte` fields when marshaling.
 
@@ -379,7 +438,7 @@ Extism PDK provides:
 ### Example Exploit (Rust)
 
 ```rust
-use extism_pdk::*;
+use extism_pdk::*;x
 use serde_json::Value;
 
 #[plugin_fn]
@@ -427,6 +486,81 @@ type Plugin interface {
 ```
 
 **Extensibility**: You can add support for other plugin formats (e.g., Go plugins, Python scripts, native binaries) by creating an implementation of this interface. 
+
+### Adding New Plugin Loader Implementations
+
+Harness uses a **registry pattern** for plugin loaders, allowing you to add support for new plugin formats without modifying any core code or constants. Each loader registers itself with a string identifier, just like keystore implementations.
+
+**Steps to add a new plugin loader:**
+
+1. **Create a new file** in the `plugin` package (e.g., `plugin/python.go`):
+
+```go
+package plugin
+
+import (
+    "context"
+    "encoding/json"
+    // ... your imports
+)
+
+func init() {
+    // Register with a string identifier - no constants needed!
+    RegisterLoader("python", func() (Loader, error) {
+        return NewPythonLoader()
+    })
+}
+
+// PythonLoader loads Python script plugins
+type PythonLoader struct {
+    // ... your implementation fields
+}
+
+// NewPythonLoader creates a new Python loader
+func NewPythonLoader() (*PythonLoader, error) {
+    // ... initialization logic
+    return &PythonLoader{}, nil
+}
+
+// Load implements the Loader interface
+func (pl *PythonLoader) Load(data []byte, name string) (Plugin, error) {
+    // ... load and return a Plugin implementation
+    return &PythonPlugin{...}, nil
+}
+```
+
+2. **Implement the `Plugin` interface** for your plugin type:
+
+```go
+// PythonPlugin implements Plugin
+type PythonPlugin struct {
+    name string
+    // ... other fields
+}
+
+func (p *PythonPlugin) Name() string { ... }
+func (p *PythonPlugin) Description() string { ... }
+func (p *PythonPlugin) JSONSchema() string { ... }
+func (p *PythonPlugin) Execute(ctx context.Context, args json.RawMessage) (interface{}, error) { ... }
+```
+
+3. **Use the new plugin type** - The loader automatically uses registered implementations:
+
+```go
+// Payload Type is now a string identifier
+payload := &crypto.Payload{
+    Type: "python",  // Use the same string identifier you registered with
+    Name: "my-script",
+    Data: scriptBytes,
+}
+plugin, err := plugin.LoadPlugin(payload)
+```
+
+**Registry API:**
+- `RegisterLoader(typeIdentifier string, factory LoaderFactory)` - Register a loader factory with a string identifier
+- `GetLoaderFactory(typeIdentifier string) (LoaderFactory, error)` - Get a factory by type identifier
+- `ListRegisteredPluginTypes() []string` - List all registered plugin type identifiers
+
 
 
 ## Example: Using a WASM Exploit

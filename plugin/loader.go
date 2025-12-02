@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/joncooperworks/harness/crypto"
-	"github.com/joncooperworks/harness/plugin/wasm"
 )
 
 // Loader loads plugins based on their type
@@ -13,14 +12,17 @@ type Loader interface {
 }
 
 // LoadPlugin loads a plugin from a Payload
+// Uses the registry to find the appropriate loader for the payload type
 func LoadPlugin(payload *crypto.Payload) (Plugin, error) {
-	if payload.Type != crypto.WASM {
-		return nil, fmt.Errorf("unsupported plugin type: %d (only WASM is supported)", payload.Type)
+	typeStr := payload.Type.String()
+	factory, err := GetLoaderFactory(typeStr)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported plugin type: %s", typeStr)
 	}
 
-	loader, err := wasm.NewWASMLoader()
+	loader, err := factory()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create WASM loader: %w", err)
+		return nil, fmt.Errorf("failed to create loader: %w", err)
 	}
 
 	return loader.Load(payload.Data, payload.Name)

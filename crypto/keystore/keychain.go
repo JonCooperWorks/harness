@@ -19,6 +19,10 @@ import (
 	"github.com/99designs/keyring"
 )
 
+func init() {
+	RegisterKeystore("darwin", NewKeychainKeystore)
+}
+
 // KeychainKeystore implements Keystore for macOS using Keychain
 type KeychainKeystore struct {
 	ring keyring.Keyring

@@ -18,6 +18,10 @@ import (
 	"github.com/99designs/keyring"
 )
 
+func init() {
+	RegisterKeystore("linux", NewKeyringKeystore)
+}
+
 // KeyringKeystore implements Keystore for Linux using libsecret/keyring
 type KeyringKeystore struct {
 	ring keyring.Keyring

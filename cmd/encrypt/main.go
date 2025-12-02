@@ -52,19 +52,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Determine plugin type
-	var pluginTypeEnum crypto.PluginType
-	switch *pluginType {
-	case "wasm":
-		pluginTypeEnum = crypto.WASM
-	default:
-		fmt.Fprintf(os.Stderr, "Error: invalid plugin type %s (must be wasm)\n", *pluginType)
-		os.Exit(1)
-	}
-
-	// Create payload
+	// Create payload (type is now a string identifier)
 	payload := crypto.Payload{
-		Type: pluginTypeEnum,
+		Type: crypto.PluginTypeString(*pluginType),
 		Name: *pluginName,
 		Data: pluginData,
 	}

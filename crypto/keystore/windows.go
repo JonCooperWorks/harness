@@ -18,6 +18,10 @@ import (
 	"github.com/99designs/keyring"
 )
 
+func init() {
+	RegisterKeystore("windows", NewWindowsKeystore)
+}
+
 // WindowsKeystore implements Keystore for Windows using Credential Manager
 type WindowsKeystore struct {
 	ring keyring.Keyring

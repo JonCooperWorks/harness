@@ -1,4 +1,4 @@
-package wasm
+package plugin
 
 import (
 	"context"
@@ -7,6 +7,12 @@ import (
 
 	extism "github.com/extism/go-sdk"
 )
+
+func init() {
+	RegisterLoader("wasm", func() (Loader, error) {
+		return NewWASMLoader()
+	})
+}
 
 // WASMLoader loads WASM plugins using Extism SDK.
 type WASMLoader struct{}
@@ -17,7 +23,7 @@ func NewWASMLoader() (*WASMLoader, error) {
 }
 
 // Load compiles and instantiates a WASM plugin from raw bytes.
-func (wl *WASMLoader) Load(data []byte, name string) (*WASMPlugin, error) {
+func (wl *WASMLoader) Load(data []byte, name string) (Plugin, error) {
 	manifest := extism.Manifest{
 		Wasm: []extism.Wasm{
 			extism.WasmData{Data: data},
@@ -136,3 +142,4 @@ func (wp *WASMPlugin) callStringFunction(functionName string) (string, error) {
 
 	return string(resultBytes), nil
 }
+

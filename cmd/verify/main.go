@@ -65,12 +65,12 @@ func main() {
 	fmt.Printf("✓ Client signature on arguments verified successfully\n")
 	fmt.Printf("✓ Plugin decrypted successfully\n")
 	fmt.Printf("\nPlugin details:\n")
-	fmt.Printf("  Type: %v\n", result.Payload.Type)
+	fmt.Printf("  Type: %s\n", result.Payload.Type.String())
 	fmt.Printf("  Name: %s\n", result.Payload.Name)
 	fmt.Printf("  Data size: %d bytes\n", len(result.Payload.Data))
 	fmt.Printf("  Arguments: %s\n", string(result.Args))
 
-	if result.Payload.Type == crypto.WASM {
+	if result.Payload.Type.String() == "wasm" {
 		fmt.Printf("  Note: WASM plugin ready to execute\n")
 	} else {
 		fmt.Printf("  Warning: Unknown plugin type\n")

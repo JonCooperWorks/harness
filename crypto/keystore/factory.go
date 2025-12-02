@@ -6,15 +6,11 @@ import (
 )
 
 // NewKeystore creates a platform-specific keystore implementation
+// Uses the registry to find the appropriate factory for the current platform
 func NewKeystore() (Keystore, error) {
-	switch runtime.GOOS {
-	case "darwin":
-		return NewKeychainKeystore()
-	case "linux":
-		return NewKeyringKeystore()
-	case "windows":
-		return NewWindowsKeystore()
-	default:
+	factory, err := GetKeystoreFactory(runtime.GOOS)
+	if err != nil {
 		return nil, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
+	return factory()
 }
