@@ -23,6 +23,7 @@ func main() {
 		encryptedFile       = flag.String("file", "", "Path to approved plugin file (with signature)")
 		keystoreKeyID       = flag.String("keystore-key", "", "Key ID in OS keystore for private key (required)")
 		signaturePubKeyFile = flag.String("signature-key", "", "Path to public key file for verifying signature (required)")
+		principalPubKeyFile = flag.String("principal-key", "", "Path to principal's public key file (required, for verifying payload signature)")
 	)
 	flag.Parse()
 
@@ -41,10 +42,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *principalPubKeyFile == "" {
+		fmt.Fprintf(os.Stderr, "Error: -principal-key is required (principal's public key for verifying payload signature)\n")
+		os.Exit(1)
+	}
+
 	// Load public key for signature verification
 	signaturePubKey, err := loadPublicKey(*signaturePubKeyFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading signature public key: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Load principal's public key (required)
+	principalPubKey, err := loadPublicKey(*principalPubKeyFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading principal's public key: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -61,7 +74,7 @@ func main() {
 	}
 
 	// Create PresidentialOrder from keystore
-	po, err := crypto.NewPresidentialOrderFromKeystore(*keystoreKeyID, signaturePubKey)
+	po, err := crypto.NewPresidentialOrderFromKeystoreWithPrincipal(*keystoreKeyID, signaturePubKey, principalPubKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating PresidentialOrder from keystore: %v\n", err)
 		os.Exit(1)
@@ -107,12 +120,26 @@ func main() {
 	pentesterPubKeyHash := sha256.Sum256(pentesterPubKeyBytes)
 	pentesterPubKeyHashHex := hex.EncodeToString(pentesterPubKeyHash[:])
 
+	// Calculate hash of principal signature
+	principalSigHash := sha256.Sum256(result.PrincipalSignature)
+	principalSigHashHex := hex.EncodeToString(principalSigHash[:])
+
+	// Calculate hash of principal public key
+	principalPubKeyBytes, err := x509.MarshalPKIXPublicKey(principalPubKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling principal public key: %v\n", err)
+		os.Exit(1)
+	}
+	principalPubKeyHash := sha256.Sum256(principalPubKeyBytes)
+	principalPubKeyHashHex := hex.EncodeToString(principalPubKeyHash[:])
+
 	// Log execution details
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] %s\n", time.Now().Format(time.RFC3339))
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Plugin Type: %s\n", result.Payload.Type.String())
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Plugin Name: %s\n", result.Payload.Name)
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Exploit Binary Hash (SHA256): %s\n", exploitHashHex)
-	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Execution Arguments: %s\n", string(result.Args))
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Principal Signature Hash (SHA256): %s\n", principalSigHashHex)
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Principal Public Key Hash (SHA256): %s\n", principalPubKeyHashHex)
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Client Signature Hash (SHA256): %s\n", signatureHashHex)
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Client Public Key Hash (SHA256): %s\n", clientPubKeyHashHex)
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Pentester Public Key Hash (SHA256): %s\n", pentesterPubKeyHashHex)

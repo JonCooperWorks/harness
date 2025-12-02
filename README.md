@@ -25,7 +25,7 @@ For offensive security teams and penetration testers who need to:
 
 ### Threats Addressed
 
-1. **Unauthorized Execution**: Client signature on arguments + expiration required; execution cryptographically impossible without it
+1. **Unauthorized Execution**: Client signature on arguments + expiration required
 2. **Exploit Confidentiality**: AES-256-GCM encryption with ECDH key exchange
 3. **Chain-of-Custody**: Non-repudiable cryptographic proof of approval
 4. **Stale Approvals**: Signed expiration timestamps prevent execution of old approvals
@@ -87,8 +87,9 @@ Pentester → Verifies signature, decrypts, executes in WASM sandbox
 
 Execution is **cryptographically impossible** without all:
 1. ✓ Exploit encrypted with pentester's public key
-2. ✓ Valid client signature on expiration + execution arguments
-3. ✓ Expiration has not passed
+2. ✓ Valid principal signature on unencrypted payload (verified after decryption)
+3. ✓ Valid client signature on expiration + execution arguments
+4. ✓ Expiration has not passed
 
 ### Keystore Interface
 
@@ -228,10 +229,14 @@ See [Plugin API](#plugin-api) section for details.
 ./bin/encrypt \
   -plugin exploit.wasm \
   -type wasm \
-  -name "cve-2024-xxxx-exploit" \
   -harness-key pentester_public.pem \
+  -principal-keystore-key "principal-key" \
   -output exploit.encrypted
 ```
+
+**Plugin Name**: The plugin name is automatically loaded from the plugin (via the `name()` function).
+
+**Principal Signature**: The principal signs the unencrypted payload before encryption, providing cryptographic proof that the principal has reviewed and approved the exploit payload.
 
 ### 4. Client Signs Execution Arguments
 
@@ -252,11 +257,13 @@ See [Plugin API](#plugin-api) section for details.
 ./bin/harness \
   -file exploit.approved \
   -keystore-key "pentester-key" \
-  -signature-key client_public.pem
+  -signature-key client_public.pem \
+  -principal-key principal_public.pem
 ```
 
-**Execution requires all three:**
+**Execution requires all four:**
 - ✓ Exploit encrypted with pentester's public key
+- ✓ Valid principal signature on unencrypted payload (verified after decryption)
 - ✓ Valid client signature on encrypted payload hash + expiration + execution arguments
 - ✓ Expiration has not passed
 
@@ -271,10 +278,14 @@ All commands log cryptographic operations to stderr for audit trails and securit
 ```
 [ENCRYPTION LOG] <timestamp>
 [ENCRYPTION LOG] Plaintext Exploit Hash (SHA256): <hash>
+[ENCRYPTION LOG] Principal Signature Hash (SHA256): <hash>
+[ENCRYPTION LOG] Principal Public Key Hash (SHA256): <hash>
 [ENCRYPTION LOG] Pentester Public Key Hash (SHA256): <hash>
 ```
 
 - **Plaintext Exploit Hash**: SHA256 of the original exploit binary before encryption
+- **Principal Signature Hash**: SHA256 of the ASN.1 DER-encoded principal signature on the unencrypted payload
+- **Principal Public Key Hash**: SHA256 of the principal's public key used for signing
 - **Pentester Public Key Hash**: SHA256 of the pentester's public key used for encryption
 
 ### Signing Logs (`cmd/sign`)
@@ -293,12 +304,16 @@ All commands log cryptographic operations to stderr for audit trails and securit
 ```
 [VERIFICATION LOG] <timestamp>
 [VERIFICATION LOG] Encrypted Payload Hash (SHA256): <hash>
+[VERIFICATION LOG] Principal Signature Hash (SHA256): <hash>
+[VERIFICATION LOG] Principal Public Key Hash (SHA256): <hash>
 [VERIFICATION LOG] Client Signature Hash (SHA256): <hash>
 [VERIFICATION LOG] Client Public Key Hash (SHA256): <hash>
 [VERIFICATION LOG] Pentester Public Key Hash (SHA256): <hash>
 ```
 
 - **Encrypted Payload Hash**: SHA256 of the encrypted payload that was verified
+- **Principal Signature Hash**: SHA256 of the ASN.1 DER-encoded principal signature
+- **Principal Public Key Hash**: SHA256 of the principal's public key used for verification
 - **Client Signature Hash**: SHA256 of the ASN.1 DER-encoded client signature
 - **Client Public Key Hash**: SHA256 of the client's public key used for verification
 - **Pentester Public Key Hash**: SHA256 of the pentester's public key used for decryption
@@ -310,14 +325,16 @@ All commands log cryptographic operations to stderr for audit trails and securit
 [EXECUTION LOG] Plugin Type: <type>
 [EXECUTION LOG] Plugin Name: <name>
 [EXECUTION LOG] Exploit Binary Hash (SHA256): <hash>
-[EXECUTION LOG] Execution Arguments: <args>
+[EXECUTION LOG] Principal Signature Hash (SHA256): <hash>
+[EXECUTION LOG] Principal Public Key Hash (SHA256): <hash>
 [EXECUTION LOG] Client Signature Hash (SHA256): <hash>
 [EXECUTION LOG] Client Public Key Hash (SHA256): <hash>
 [EXECUTION LOG] Pentester Public Key Hash (SHA256): <hash>
 ```
 
 - **Exploit Binary Hash**: SHA256 of the decrypted exploit binary that was executed
-- **Execution Arguments**: The JSON arguments that were executed with
+- **Principal Signature Hash**: SHA256 of the verified principal signature
+- **Principal Public Key Hash**: SHA256 of the principal's public key used for verification
 - **Client Signature Hash**: SHA256 of the verified client signature
 - **Client Public Key Hash**: SHA256 of the client's public key used for verification
 - **Pentester Public Key Hash**: SHA256 of the pentester's public key used for decryption
@@ -355,10 +372,11 @@ All commands log cryptographic operations to stderr for audit trails and securit
 ### Cryptographic Flow
 
 1. **Encrypting Exploit** (Principal):
+   - Sign unencrypted payload with principal's private key (ECDSA)
    - Generate AES-256 symmetric key
    - Encrypt payload with symmetric key (AES-256-GCM)
    - Encrypt symmetric key with pentester's public key (ECDH)
-   - Write encrypted file (no signature)
+   - Write encrypted file with principal signature
 
 2. **Signing Arguments** (Client):
    - Set expiration (default: 3 days)
@@ -368,12 +386,14 @@ All commands log cryptographic operations to stderr for audit trails and securit
 
 3. **Verification & Execution** (Pentester):
    - Read version field (must be 1)
+   - Extract principal signature
    - Verify expiration not passed
    - Hash encrypted payload
    - Verify client signature on encrypted payload hash + expiration + arguments
    - Decrypt symmetric key with private key (ECDH)
    - Decrypt exploit data with symmetric key (AES-256-GCM)
-   - Log execution details (args, exploit hash)
+   - Verify principal signature on decrypted payload (principal public key required)
+   - Log execution details (exploit hash, signatures)
    - Load WASM directly into sandbox
    - Execute with signed arguments
 
@@ -382,14 +402,16 @@ All commands log cryptographic operations to stderr for audit trails and securit
 The encrypted exploit file format (after client signing) is:
 
 ```
-[version:1 byte][metadata_length:4 bytes][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4 bytes][client_sig][expiration:8 bytes][args_len:4 bytes][args_json]
+[version:1 byte][principal_sig_len:4 bytes][principal_sig][metadata_length:4 bytes][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4 bytes][client_sig][expiration:8 bytes][args_len:4 bytes][args_json]
 ```
 
 #### File Layout
 
 | Field | Size | Description |
 |-------|------|-------------|
-| `version` | 1 byte | Format version (must be 1). Includes encrypted payload hash in signature. |
+| `version` | 1 byte | Format version (must be 1). Includes principal signature and encrypted payload hash in signatures. |
+| `principal_sig_len` | 4 bytes | Big-endian uint32: length of principal signature in bytes |
+| `principal_sig` | variable | ASN.1 DER-encoded ECDSA signature (R, S values) signing the unencrypted payload |
 | `metadata_length` | 4 bytes | Big-endian uint32: length of metadata JSON in bytes |
 | `metadata` | variable | JSON object containing encryption metadata |
 | `encrypted_symmetric_key` | variable | Encrypted AES-256 symmetric key (see format below) |
@@ -399,6 +421,14 @@ The encrypted exploit file format (after client signing) is:
 | `expiration` | 8 bytes | Big-endian uint64: Unix timestamp (seconds) when payload expires |
 | `args_len` | 4 bytes | Big-endian uint32: length of arguments JSON in bytes |
 | `args_json` | variable | JSON object containing execution arguments |
+
+#### Principal Signature Format
+
+- **Algorithm**: ECDSA with P-256 curve
+- **Encoding**: ASN.1 DER format
+- **Signed Data**: SHA-256 hash of the unencrypted payload (before encryption)
+- **Purpose**: Ensures authenticity and integrity of the exploit payload
+- **Authorization**: Proves principal has reviewed and approved the specific exploit payload before encryption
 
 #### Client Signature Format
 
@@ -635,12 +665,12 @@ plugin, err := plugin.LoadPlugin(payload)
 ## Example: Using a WASM Exploit
 
 ```bash
-# Principal encrypts exploit
+# Principal encrypts exploit and signs unencrypted payload
 ./bin/encrypt \
   -plugin exploit.wasm \
   -type wasm \
-  -name "cve-2024-xxxx-exploit" \
   -harness-key pentester_public.pem \
+  -principal-keystore-key "principal-key" \
   -output exploit.encrypted
 
 # Client signs execution arguments
@@ -651,11 +681,12 @@ plugin, err := plugin.LoadPlugin(payload)
   -expiration 72h \
   -output exploit.approved
 
-# Pentester executes (requires both authorizations)
+# Pentester executes (requires principal signature, client signature, and valid expiration)
 ./bin/harness \
   -file exploit.approved \
   -keystore-key "pentester-key" \
-  -signature-key client_public.pem
+  -signature-key client_public.pem \
+  -principal-key principal_public.pem
 ```
 
 ## Platform Notes

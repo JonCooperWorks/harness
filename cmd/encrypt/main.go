@@ -17,15 +17,17 @@ import (
 	"time"
 
 	"github.com/joncooperworks/harness/crypto"
+	"github.com/joncooperworks/harness/crypto/keystore"
+	"github.com/joncooperworks/harness/plugin"
 )
 
 func main() {
 	var (
-		pluginFile        = flag.String("plugin", "", "Path to plugin file to encrypt")
-		pluginType        = flag.String("type", "wasm", "Plugin type: wasm")
-		pluginName        = flag.String("name", "test-plugin", "Plugin name")
-		harnessPubKeyPath = flag.String("harness-key", "", "Path to pentester's public key (for encryption - this is the harness key)")
-		outputPath        = flag.String("output", "plugin.encrypted", "Path to save encrypted plugin")
+		pluginFile           = flag.String("plugin", "", "Path to plugin file to encrypt")
+		pluginType           = flag.String("type", "wasm", "Plugin type: wasm")
+		harnessPubKeyPath    = flag.String("harness-key", "", "Path to pentester's public key (for encryption - this is the harness key)")
+		principalKeystoreKey = flag.String("principal-keystore-key", "", "Key ID in OS keystore for principal's private key (for signing unencrypted payload)")
+		outputPath           = flag.String("output", "plugin.encrypted", "Path to save encrypted plugin")
 	)
 	flag.Parse()
 
@@ -39,11 +41,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *principalKeystoreKey == "" {
+		fmt.Fprintf(os.Stderr, "Error: -principal-keystore-key is required\n")
+		os.Exit(1)
+	}
+
 	// Load pentester's public key (for encryption - this is the harness key)
 	// The exploit is encrypted with the pentester's public key so they can decrypt and execute
 	harnessPubKey, err := loadPublicKey(*harnessPubKeyPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading pentester's public key: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Load keystore for principal signature
+	ks, err := keystore.NewKeystore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -54,9 +68,49 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Calculate hash of plaintext exploit for logging
+	// Load plugin to get its name from the plugin itself
+	tempPayload := &crypto.Payload{
+		Type: crypto.PluginTypeString(*pluginType),
+		Name: "", // Temporary - plugin will provide its own name
+		Data: pluginData,
+	}
+	plg, err := plugin.LoadPlugin(tempPayload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading plugin: %v\n", err)
+		os.Exit(1)
+	}
+	pluginName := plg.Name()
+
+	// Sign unencrypted payload with principal key
 	plaintextHash := sha256.Sum256(pluginData)
+	principalSignature, err := ks.Sign(*principalKeystoreKey, plaintextHash[:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error signing unencrypted payload: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Get principal public key for logging
+	principalPubKey, err := ks.GetPublicKey(*principalKeystoreKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting principal public key: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Calculate hash of plaintext exploit for logging
 	plaintextHashHex := hex.EncodeToString(plaintextHash[:])
+
+	// Calculate hash of principal signature for logging
+	principalSigHash := sha256.Sum256(principalSignature)
+	principalSigHashHex := hex.EncodeToString(principalSigHash[:])
+
+	// Calculate hash of principal public key for logging
+	principalPubKeyBytes, err := x509.MarshalPKIXPublicKey(principalPubKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling principal public key: %v\n", err)
+		os.Exit(1)
+	}
+	principalPubKeyHash := sha256.Sum256(principalPubKeyBytes)
+	principalPubKeyHashHex := hex.EncodeToString(principalPubKeyHash[:])
 
 	// Calculate hash of pentester's public key for logging
 	pubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
@@ -70,12 +124,14 @@ func main() {
 	// Log encryption details
 	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] %s\n", time.Now().Format(time.RFC3339))
 	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Plaintext Exploit Hash (SHA256): %s\n", plaintextHashHex)
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Principal Signature Hash (SHA256): %s\n", principalSigHashHex)
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Principal Public Key Hash (SHA256): %s\n", principalPubKeyHashHex)
 	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Pentester Public Key Hash (SHA256): %s\n", pubKeyHashHex)
 
 	// Create payload (type is now a string identifier)
 	payload := crypto.Payload{
 		Type: crypto.PluginTypeString(*pluginType),
-		Name: *pluginName,
+		Name: pluginName,
 		Data: pluginData,
 	}
 
@@ -119,9 +175,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Build encrypted file structure (without signature):
-	// [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	// Build encrypted file structure with principal signature:
+	// [principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 	var output []byte
+
+	// Write principal signature length
+	principalSigLenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(principalSigLenBuf, uint32(len(principalSignature)))
+	output = append(output, principalSigLenBuf...)
+
+	// Write principal signature
+	output = append(output, principalSignature...)
 
 	// Write metadata length
 	metadataLenBuf := make([]byte, 4)
@@ -147,7 +211,7 @@ func main() {
 	fmt.Printf("  Input: %s\n", *pluginFile)
 	fmt.Printf("  Output: %s\n", *outputPath)
 	fmt.Printf("  Type: %s\n", *pluginType)
-	fmt.Printf("  Name: %s\n", *pluginName)
+	fmt.Printf("  Name: %s\n", pluginName)
 	fmt.Printf("\nNext step: Sign the encrypted file with ./bin/sign\n")
 }
 

@@ -57,7 +57,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load encrypted file (format: [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data])
+	// Load encrypted file (format: [principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data])
 	encryptedData, err := os.ReadFile(*encryptedFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading encrypted file: %v\n", err)
@@ -107,7 +107,7 @@ func main() {
 	}
 
 	// Build final approved file structure:
-	// [version:1][encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
+	// [version:1][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
 	var output []byte
 
 	// Write version (1 byte, version 1)
@@ -146,6 +146,5 @@ func main() {
 	fmt.Printf("Arguments signed successfully:\n")
 	fmt.Printf("  Input: %s\n", *encryptedFile)
 	fmt.Printf("  Output: %s\n", *outputPath)
-	fmt.Printf("  Arguments: %s\n", *argsJSON)
 	fmt.Printf("  Expiration: %s (%s)\n", expirationTime.Format(time.RFC3339), expirationTime.Format(time.RFC1123))
 }
