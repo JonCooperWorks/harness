@@ -90,7 +90,7 @@ Execution is **cryptographically impossible** without all:
 
 ### Keystore Interface
 
-Go interface (`crypto/keystore/Keystore`) provides cryptographic operations without exposing private keys, allowing hardware-backed or cloud-based key storage:
+Go interface ([`crypto/keystore/Keystore`](crypto/keystore/interface.go)) provides cryptographic operations without exposing private keys, allowing hardware-backed or cloud-based key storage:
 
 ```go
 type Keystore interface {
@@ -415,7 +415,7 @@ pub fn execute() -> FnResult<Json<Value>> {
 
 ### Plugin Interface (Go)
 
-The internal Go interface that plugins must implement:
+Harness is engine-agnostic and supports multiple plugin formats through a unified interface. The WASM loader ([`plugin/wasm/loader.go`](plugin/wasm/loader.go)) is one such implementation that translates between the Go interface and Extism SDK calls to WASM modules compiled to `wasm32-wasip1` target.
 
 ```go
 type Plugin interface {
@@ -426,9 +426,8 @@ type Plugin interface {
 }
 ```
 
-**Extensibility**: You can add support for other plugin formats (e.g., Go plugins, Python scripts, native binaries) by creating an implementation of this interface. The WASM loader (`plugin/wasm/loader.go`) is one such implementation that translates between the Go interface and Extism SDK calls to WASM modules.
+**Extensibility**: You can add support for other plugin formats (e.g., Go plugins, Python scripts, native binaries) by creating an implementation of this interface. 
 
-**Current Support**: Only WASM exploits are currently supported. Compile to `wasm32-wasip1` target.
 
 ## Example: Using a WASM Exploit
 
