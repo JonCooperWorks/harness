@@ -415,6 +415,8 @@ pub fn execute() -> FnResult<Json<Value>> {
 
 ### Plugin Interface (Go)
 
+The internal Go interface that plugins must implement:
+
 ```go
 type Plugin interface {
     Name() string
@@ -424,7 +426,9 @@ type Plugin interface {
 }
 ```
 
-**Note**: Only WASM exploits supported. Compile to `wasm32-wasip1` target.
+**Extensibility**: You can add support for other plugin formats (e.g., Go plugins, Python scripts, native binaries) by creating an implementation of this interface. The WASM loader (`plugin/wasm/loader.go`) is one such implementation that translates between the Go interface and Extism SDK calls to WASM modules.
+
+**Current Support**: Only WASM exploits are currently supported. Compile to `wasm32-wasip1` target.
 
 ## Example: Using a WASM Exploit
 
