@@ -2,6 +2,8 @@
 
 A cryptographically secure system for storing, transporting, approving, and executing sensitive payloads including zero-day exploits and high-risk penetration testing tools. Harness enforces **dual-authorization** through cryptographic encryption and signatures, ensuring exploits cannot be executed without explicit approval from both the principal (firm leadership) and the client (President).
 
+**Documentation**: [pkg.go.dev/github.com/joncooperworks/harness](https://pkg.go.dev/github.com/joncooperworks/harness)
+
 ## Purpose
 
 For offensive security teams and penetration testers who need to:

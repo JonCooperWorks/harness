@@ -1,11 +1,7 @@
 package main
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ecdsa"
-	"crypto/hkdf"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/binary"
@@ -17,6 +13,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/joncooperworks/harness/crypto"
 	"github.com/joncooperworks/harness/crypto/keystore"
 )
 
@@ -69,47 +66,64 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Validate args JSON
-	var args json.RawMessage
-	if err := json.Unmarshal([]byte(*argsJSON), &args); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid JSON in -args: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Encrypt arguments with pentester's public key
-	argsBytes := []byte(*argsJSON)
-	encryptedArgs, err := encryptArgs(argsBytes, pentesterPubKey)
+	// Open encrypted file
+	encryptedFileHandle, err := os.Open(*encryptedFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error encrypting arguments: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error opening encrypted file: %v\n", err)
 		os.Exit(1)
 	}
+	defer encryptedFileHandle.Close()
 
-	// Load encrypted file (format: [principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data])
-	encryptedData, err := os.ReadFile(*encryptedFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading encrypted file: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Calculate expiration timestamp (Unix timestamp in seconds)
+	// Calculate expiration timestamp
 	expirationTime := time.Now().Add(*expirationDur)
-	expirationUnix := expirationTime.Unix()
 
-	// Extract encrypted payload for hashing (everything after principal signature)
-	// Encrypted payload = [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
-	// Skip principal_sig_len (4 bytes) and principal_sig (variable)
-	if len(encryptedData) < 4 {
-		fmt.Fprintf(os.Stderr, "Error: encrypted file too short\n")
+	// Sign encrypted plugin using library function
+	signReq := &crypto.SignEncryptedPluginRequest{
+		EncryptedData:   encryptedFileHandle,
+		ArgsJSON:        []byte(*argsJSON),
+		ClientKeystore:  ks,
+		ClientKeyID:     *clientKeyID,
+		PentesterPubKey: pentesterPubKey,
+		Expiration:      &expirationTime,
+	}
+
+	result, err := crypto.SignEncryptedPlugin(signReq)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error signing encrypted plugin: %v\n", err)
 		os.Exit(1)
 	}
-	principalSigLen := int(binary.BigEndian.Uint32(encryptedData[0:4]))
-	if len(encryptedData) < 4+principalSigLen {
-		fmt.Fprintf(os.Stderr, "Error: encrypted file too short for principal signature\n")
+
+	// Extract encrypted payload hash for logging
+	// Format: [version:1][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
+	if len(result.ApprovedData) < 1+4 {
+		fmt.Fprintf(os.Stderr, "Error: approved data too short\n")
 		os.Exit(1)
 	}
-	encryptedPayload := encryptedData[4+principalSigLen:]
-
-	// Hash the encrypted payload to include in signature
+	principalSigLen := int(binary.BigEndian.Uint32(result.ApprovedData[1:5]))
+	if len(result.ApprovedData) < 1+4+principalSigLen+4 {
+		fmt.Fprintf(os.Stderr, "Error: approved data too short\n")
+		os.Exit(1)
+	}
+	encryptedPayloadStart := 1 + 4 + principalSigLen
+	// Find end of encrypted payload (before client signature)
+	// We need to read metadata to find the exact end
+	metadataLen := int(binary.BigEndian.Uint32(result.ApprovedData[encryptedPayloadStart : encryptedPayloadStart+4]))
+	if len(result.ApprovedData) < encryptedPayloadStart+4+metadataLen {
+		fmt.Fprintf(os.Stderr, "Error: approved data too short for metadata\n")
+		os.Exit(1)
+	}
+	metadataStart := encryptedPayloadStart + 4
+	metadataEnd := metadataStart + metadataLen
+	var metadataStruct struct {
+		SymmetricKeyLen int `json:"symmetric_key_len"`
+		PluginDataLen   int `json:"plugin_data_len"`
+	}
+	if err := json.Unmarshal(result.ApprovedData[metadataStart:metadataEnd], &metadataStruct); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing metadata: %v\n", err)
+		os.Exit(1)
+	}
+	encryptedPayloadEnd := metadataEnd + metadataStruct.SymmetricKeyLen + metadataStruct.PluginDataLen
+	encryptedPayload := result.ApprovedData[encryptedPayloadStart:encryptedPayloadEnd]
 	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
 	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
 
@@ -132,50 +146,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "[SIGNING LOG] Encrypted Payload Hash (SHA256): %s\n", encryptedPayloadHashHex)
 	fmt.Fprintf(os.Stderr, "[SIGNING LOG] Client Public Key Hash (SHA256): %s\n", pubKeyHashHex)
 
-	// Sign encrypted payload hash + expiration + encrypted arguments together using keystore (key never leaves secure storage)
-	// Create data to sign: encrypted_payload_hash (32 bytes) + expiration (8 bytes) + encrypted_args
-	dataToSign := make([]byte, 32+8+len(encryptedArgs))
-	copy(dataToSign[0:32], encryptedPayloadHash[:])
-	binary.BigEndian.PutUint64(dataToSign[32:40], uint64(expirationUnix))
-	copy(dataToSign[40:], encryptedArgs)
-
-	hash := sha256.Sum256(dataToSign)
-	signature, err := ks.Sign(*clientKeyID, hash[:])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error signing payload and arguments: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Build final approved file structure:
-	// [version:1][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
-	var output []byte
-
-	// Write version (1 byte, version 1)
-	output = append(output, byte(1))
-
-	// Write encrypted payload (already in correct format)
-	output = append(output, encryptedData...)
-
-	// Write client signature length
-	sigLenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(sigLenBuf, uint32(len(signature)))
-	output = append(output, sigLenBuf...)
-
-	// Write client signature
-	output = append(output, signature...)
-
-	// Write expiration timestamp (Unix timestamp, 8 bytes)
-	expirationBuf := make([]byte, 8)
-	binary.BigEndian.PutUint64(expirationBuf, uint64(expirationUnix))
-	output = append(output, expirationBuf...)
-
-	// Write encrypted args length
-	argsLenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(argsLenBuf, uint32(len(encryptedArgs)))
-	output = append(output, argsLenBuf...)
-
-	// Write encrypted args
-	output = append(output, encryptedArgs...)
+	output := result.ApprovedData
 
 	// Write to file
 	if err := os.WriteFile(*outputPath, output, 0644); err != nil {
@@ -186,7 +157,7 @@ func main() {
 	fmt.Printf("Arguments signed successfully:\n")
 	fmt.Printf("  Input: %s\n", *encryptedFile)
 	fmt.Printf("  Output: %s\n", *outputPath)
-	fmt.Printf("  Expiration: %s (%s)\n", expirationTime.Format(time.RFC3339), expirationTime.Format(time.RFC1123))
+	fmt.Printf("  Expiration: %s (%s)\n", result.ExpirationTime.Format(time.RFC3339), result.ExpirationTime.Format(time.RFC1123))
 }
 
 // loadPublicKey loads an ECDSA public key from a file
@@ -214,111 +185,4 @@ func loadPublicKey(path string) (*ecdsa.PublicKey, error) {
 	}
 
 	return ecdsaPubKey, nil
-}
-
-// validatePublicKey validates that a public key point is on the curve and not at infinity
-func validatePublicKey(pubKey *ecdsa.PublicKey) error {
-	if pubKey == nil {
-		return fmt.Errorf("public key cannot be nil")
-	}
-	if pubKey.Curve == nil {
-		return fmt.Errorf("public key curve cannot be nil")
-	}
-	if pubKey.X == nil || pubKey.Y == nil {
-		return fmt.Errorf("public key point coordinates cannot be nil")
-	}
-	if !pubKey.Curve.IsOnCurve(pubKey.X, pubKey.Y) {
-		return fmt.Errorf("public key point is not on the curve")
-	}
-	return nil
-}
-
-// padSharedSecret pads a shared secret to exactly 32 bytes for consistent key derivation
-func padSharedSecret(secret []byte) []byte {
-	const keySize = 32
-	if len(secret) >= keySize {
-		return secret[len(secret)-keySize:]
-	}
-	padded := make([]byte, keySize)
-	copy(padded[keySize-len(secret):], secret)
-	return padded
-}
-
-// deriveKey derives a 32-byte AES key using HKDF-SHA256
-func deriveKey(sharedSecret []byte, context string) ([32]byte, error) {
-	paddedSecret := padSharedSecret(sharedSecret)
-	keyBytes, err := hkdf.Key(sha256.New, paddedSecret, nil, context, 32)
-	if err != nil {
-		var key [32]byte
-		return key, fmt.Errorf("failed to derive key: %w", err)
-	}
-	var key [32]byte
-	copy(key[:], keyBytes)
-	return key, nil
-}
-
-// encryptArgs encrypts arguments using ECDH + AES-256-GCM (same method as encryptSymmetricKey)
-func encryptArgs(plaintext []byte, publicKey *ecdsa.PublicKey) ([]byte, error) {
-	// Validate public key
-	if err := validatePublicKey(publicKey); err != nil {
-		return nil, fmt.Errorf("invalid public key: %w", err)
-	}
-
-	// Generate ephemeral key pair for ECDH
-	ephemeralPrivate, err := ecdsa.GenerateKey(publicKey.Curve, rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate ephemeral key: %w", err)
-	}
-
-	// Validate ephemeral public key
-	if err := validatePublicKey(&ephemeralPrivate.PublicKey); err != nil {
-		return nil, fmt.Errorf("invalid ephemeral public key: %w", err)
-	}
-
-	// Compute shared secret using ECDH
-	sharedX, _ := publicKey.Curve.ScalarMult(publicKey.X, publicKey.Y, ephemeralPrivate.D.Bytes())
-	sharedSecret := sharedX.Bytes()
-
-	// Derive AES key from shared secret using HKDF
-	aesKey, err := deriveKey(sharedSecret, "harness-args-v1")
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive key: %w", err)
-	}
-
-	// Encrypt with AES-GCM
-	nonce := make([]byte, 12) // GCM standard nonce size
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("failed to generate nonce: %w", err)
-	}
-
-	block, err := aes.NewCipher(aesKey[:])
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cipher: %w", err)
-	}
-
-	// Encrypt with GCM
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %w", err)
-	}
-
-	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
-
-	// Build result: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
-	result := make([]byte, 0, 65+12+len(ciphertext))
-
-	// Encode ephemeral public key (uncompressed: 0x04 || x || y)
-	ephemeralPubBytes := make([]byte, 65)
-	ephemeralPubBytes[0] = 0x04
-	copy(ephemeralPubBytes[1:33], ephemeralPrivate.PublicKey.X.Bytes())
-	copy(ephemeralPubBytes[33:65], ephemeralPrivate.PublicKey.Y.Bytes())
-	result = append(result, ephemeralPubBytes...)
-
-	// Append nonce
-	result = append(result, nonce...)
-
-	// Append ciphertext (includes authentication tag)
-	result = append(result, ciphertext...)
-
-	return result, nil
 }

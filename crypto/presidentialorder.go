@@ -20,16 +20,44 @@ import (
 	"github.com/joncooperworks/harness/crypto/keystore"
 )
 
-// DecryptedResult contains both the decrypted payload and the execution arguments
+// DecryptedResult contains both the decrypted payload and the execution arguments.
+//
+// This is returned by PresidentialOrder.VerifyAndDecrypt after successfully
+// verifying all signatures and decrypting the plugin data.
 type DecryptedResult struct {
-	Payload            *Payload
-	Args               []byte // JSON arguments extracted from the file
-	ClientSignature    []byte // Client signature from the file
-	PrincipalSignature []byte // Principal signature from the file
+	// Payload is the decrypted plugin payload containing the plugin type, name, and binary data.
+	Payload *Payload
+	// Args are the JSON execution arguments extracted from the approved file.
+	// These were encrypted with the pentester's public key and signed by the client.
+	Args []byte
+	// ClientSignature is the client's signature from the approved file.
+	// This signature covers the encrypted payload hash, expiration, and encrypted arguments.
+	ClientSignature []byte
+	// PrincipalSignature is the principal's signature from the approved file.
+	// This signature covers the encrypted payload hash.
+	PrincipalSignature []byte
 }
 
-// PresidentialOrder interface for verifying signatures and decrypting payloads
+// PresidentialOrder is an interface for verifying signatures and decrypting payloads.
+//
+// Implementations of this interface handle the pentester's role in the dual-authorization
+// model: verifying both principal and client signatures, checking expiration, and
+// decrypting the plugin data and execution arguments.
+//
+// The VerifyAndDecrypt method performs all verification and decryption operations,
+// ensuring that execution only proceeds if:
+//  1. The principal signature is valid (proves principal approved the encrypted payload)
+//  2. The client signature is valid (proves client approved the arguments and expiration)
+//  3. The expiration has not passed
+//  4. All cryptographic operations succeed
 type PresidentialOrder interface {
+	// VerifyAndDecrypt verifies signatures and decrypts the payload.
+	//
+	// The ciphertextAndMetadata must be in the approved file format:
+	// [version:1][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
+	//
+	// Returns an error if any signature verification fails, expiration has passed,
+	// or decryption fails.
 	VerifyAndDecrypt(ciphertextAndMetadata []byte) (*DecryptedResult, error)
 }
 
@@ -42,7 +70,14 @@ type PresidentialOrderImpl struct {
 	keystoreKeyID   string
 }
 
-// NewPresidentialOrderFromKeys creates a new PresidentialOrder from provided keys
+// NewPresidentialOrderFromKeys creates a new PresidentialOrder from provided keys.
+//
+// DEPRECATED: Use NewPresidentialOrderFromKeystoreWithPrincipal instead.
+// Private keys should be stored in OS keystores, not loaded into memory.
+//
+// This function creates a PresidentialOrder using an in-memory private key.
+// The privateKey is the pentester's private key for decryption.
+// The clientPubKey is the client's public key for verifying argument signatures.
 func NewPresidentialOrderFromKeys(privateKey *ecdsa.PrivateKey, clientPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
 	if privateKey == nil {
 		return nil, errors.New("private key cannot be nil")
@@ -56,12 +91,33 @@ func NewPresidentialOrderFromKeys(privateKey *ecdsa.PrivateKey, clientPubKey *ec
 	}, nil
 }
 
-// NewPresidentialOrderFromKeystore creates a new PresidentialOrder loading the private key from OS keystore
+// NewPresidentialOrderFromKeystore creates a new PresidentialOrder loading the private key from OS keystore.
+//
+// DEPRECATED: Use NewPresidentialOrderFromKeystoreWithPrincipal instead.
+// Principal signature verification is required for security.
+//
+// This function creates a PresidentialOrder using a private key stored in the OS keystore.
+// The keystoreKeyID identifies the pentester's private key in the keystore.
+// The clientPubKey is the client's public key for verifying argument signatures.
+//
+// Note: This function does not include principal signature verification.
+// Use NewPresidentialOrderFromKeystoreWithPrincipal for full security.
 func NewPresidentialOrderFromKeystore(keystoreKeyID string, clientPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
 	return NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID, clientPubKey, nil)
 }
 
-// NewPresidentialOrderFromKeystoreWithPrincipal creates a new PresidentialOrder with principal public key
+// NewPresidentialOrderFromKeystoreWithPrincipal creates a new PresidentialOrder with principal public key.
+//
+// This is the recommended way to create a PresidentialOrder. It uses a private key
+// stored in the OS keystore (never loaded into memory) and includes both client and
+// principal signature verification for full dual-authorization security.
+//
+// The keystoreKeyID identifies the pentester's private key in the OS keystore.
+// The clientPubKey is the client's public key for verifying argument signatures.
+// The principalPubKey is the principal's public key for verifying payload signatures.
+//
+// The private key never leaves secure storage - all decryption operations happen
+// through the keystore interface, allowing hardware-backed or cloud-based key storage.
 func NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID string, clientPubKey *ecdsa.PublicKey, principalPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
 	if keystoreKeyID == "" {
 		return nil, errors.New("keystore key ID cannot be empty")
@@ -88,8 +144,17 @@ func NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID string, clientP
 	}, nil
 }
 
-// NewPresidentialOrderFromFile creates a new PresidentialOrder loading the private key from a file
-// DEPRECATED: Use NewPresidentialOrderFromKeystore instead (private keys should only be in keystore)
+// NewPresidentialOrderFromFile creates a new PresidentialOrder loading the private key from a file.
+//
+// DEPRECATED: Use NewPresidentialOrderFromKeystoreWithPrincipal instead.
+// Private keys should be stored in OS keystores, not in files.
+//
+// This function creates a PresidentialOrder using a private key loaded from a file.
+// The privateKeyPath is the path to a PEM-encoded private key file.
+// The clientPubKey is the client's public key for verifying argument signatures.
+//
+// Security Warning: Loading private keys from files exposes them to the filesystem
+// and process memory. Use OS keystore integration instead.
 func NewPresidentialOrderFromFile(privateKeyPath string, clientPubKey *ecdsa.PublicKey) (PresidentialOrder, error) {
 	if privateKeyPath == "" {
 		return nil, errors.New("private key path cannot be empty")
@@ -114,9 +179,23 @@ func NewPresidentialOrderFromFile(privateKeyPath string, clientPubKey *ecdsa.Pub
 	}, nil
 }
 
-// VerifyAndDecrypt verifies signatures and decrypts the payload
+// VerifyAndDecrypt verifies signatures and decrypts the payload.
+//
+// This method implements the pentester's role in the dual-authorization model:
+//  1. Verifies the principal signature on the encrypted payload hash (before decryption)
+//  2. Verifies the client signature on encrypted payload hash + expiration + arguments
+//  3. Checks that the expiration has not passed
+//  4. Decrypts the symmetric key using ECDH with the pentester's private key (from keystore)
+//  5. Decrypts the plugin data using AES-256-GCM
+//  6. Decrypts the execution arguments using ECDH
+//
 // File format: [version:1][principal_sig_len:4][principal_sig][metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
+//
 // Principal signature signs: SHA256([metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data])
+//
+// Client signature signs: SHA256(SHA256(encrypted_payload) || expiration || encrypted_args)
+//
+// Returns an error if any verification fails, expiration has passed, or decryption fails.
 func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedResult, error) {
 	const (
 		minFileSize     = 1 + 4 + 50 + 4 + 4 + 4 + 60 + 8 + 4 // version + principal_sig_len + min_sig + metadata_len + min_metadata + client_sig_len + min_sig + expiration + args_len
