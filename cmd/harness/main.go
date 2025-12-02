@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -87,6 +88,87 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Extract encrypted payload for logging (parse backwards to find signature position)
+	// File format: [version:1][encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
+	if len(fileData) < 21 {
+		fmt.Fprintf(os.Stderr, "Error: file too short\n")
+		os.Exit(1)
+	}
+
+	// Find args_len by parsing backwards
+	var argsLenPos int
+	foundArgsLen := false
+	for offset := 4; offset < len(fileData) && offset < 1024*1024+4; offset++ {
+		argsLenPos = len(fileData) - offset
+		if argsLenPos < 0 {
+			break
+		}
+		if argsLenPos+4 > len(fileData) {
+			continue
+		}
+		candidateArgsLen := int(binary.BigEndian.Uint32(fileData[argsLenPos : argsLenPos+4]))
+		argsStart := argsLenPos + 4
+		expectedArgsEnd := argsStart + candidateArgsLen
+		if expectedArgsEnd == len(fileData) {
+			if candidateArgsLen > 0 && argsStart < len(fileData) {
+				argsJSON := fileData[argsStart : argsStart+candidateArgsLen]
+				if len(argsJSON) > 0 && (argsJSON[0] == '{' || argsJSON[0] == '[') {
+					foundArgsLen = true
+					break
+				}
+			} else if candidateArgsLen == 0 {
+				foundArgsLen = true
+				break
+			}
+		}
+	}
+
+	if !foundArgsLen {
+		fmt.Fprintf(os.Stderr, "Error: could not find valid args_len\n")
+		os.Exit(1)
+	}
+
+	// Find signature position (8 bytes before args_len is expiration, signature ends at expiration)
+	expirationPos := argsLenPos - 8
+	if expirationPos < 0 {
+		fmt.Fprintf(os.Stderr, "Error: file too short for expiration\n")
+		os.Exit(1)
+	}
+
+	// Find signature length (4 bytes before signature start)
+	var sigLenPos int
+	foundSigLen := false
+	minPos := expirationPos - 4 - 80
+	if minPos < 0 {
+		minPos = 0
+	}
+	for pos := expirationPos - 4 - 60; pos >= minPos && pos >= 0; pos-- {
+		if pos+4 > expirationPos {
+			continue
+		}
+		sigLenCandidate := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
+		if sigLenCandidate >= 60 && sigLenCandidate <= 80 {
+			sigStart := pos + 4
+			sigEnd := sigStart + sigLenCandidate
+			if sigEnd == expirationPos {
+				sigLenPos = pos
+				foundSigLen = true
+				break
+			}
+		}
+	}
+
+	if !foundSigLen {
+		fmt.Fprintf(os.Stderr, "Error: could not find valid signature length\n")
+		os.Exit(1)
+	}
+
+	// Extract encrypted payload (after version byte, before signature)
+	encryptedPayloadStart := 1 // Skip version byte
+	encryptedPayload := fileData[encryptedPayloadStart:sigLenPos]
+	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
+	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
+
 	// Verify client signature on arguments and decrypt
 	result, err := po.VerifyAndDecrypt(fileData)
 	if err != nil {
@@ -135,6 +217,7 @@ func main() {
 
 	// Log execution details
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] %s\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Encrypted Payload Hash (SHA256): %s\n", encryptedPayloadHashHex)
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Plugin Type: %s\n", result.Payload.Type.String())
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Plugin Name: %s\n", result.Payload.Name)
 	fmt.Fprintf(os.Stderr, "[EXECUTION LOG] Exploit Binary Hash (SHA256): %s\n", exploitHashHex)

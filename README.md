@@ -322,6 +322,7 @@ All commands log cryptographic operations to stderr for audit trails and securit
 
 ```
 [EXECUTION LOG] <timestamp>
+[EXECUTION LOG] Encrypted Payload Hash (SHA256): <hash>
 [EXECUTION LOG] Plugin Type: <type>
 [EXECUTION LOG] Plugin Name: <name>
 [EXECUTION LOG] Exploit Binary Hash (SHA256): <hash>
@@ -332,6 +333,7 @@ All commands log cryptographic operations to stderr for audit trails and securit
 [EXECUTION LOG] Pentester Public Key Hash (SHA256): <hash>
 ```
 
+- **Encrypted Payload Hash**: SHA256 of the encrypted payload (matches the hash signed by client and logged in sign/verify commands)
 - **Exploit Binary Hash**: SHA256 of the decrypted exploit binary that was executed
 - **Principal Signature Hash**: SHA256 of the verified principal signature
 - **Principal Public Key Hash**: SHA256 of the principal's public key used for verification
