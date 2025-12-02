@@ -24,6 +24,7 @@ func main() {
 	var (
 		encryptedFile     = flag.String("file", "", "Path to encrypted plugin file (from encrypt command)")
 		targetKeystoreKey = flag.String("target-keystore-key", "", "Key ID in OS keystore for target's private key (required, for signing execution arguments)")
+		exploitPubKeyFile = flag.String("exploit-key", "", "Path to exploit owner's public key file (required, for verifying payload signature)")
 		harnessPubKeyFile = flag.String("harness-key", "", "Path to harness (pentester) public key file (required, for encrypting arguments)")
 		argsJSON          = flag.String("args", "", "JSON execution arguments to sign (required)")
 		expirationDur     = flag.Duration("expiration", 72*time.Hour, "Expiration duration from now (default: 72h = 3 days)")
@@ -38,6 +39,11 @@ func main() {
 
 	if *targetKeystoreKey == "" {
 		logger.Error("missing required flag", "flag", "target-keystore-key", "message", "target's private key for signing execution arguments")
+		os.Exit(1)
+	}
+
+	if *exploitPubKeyFile == "" {
+		logger.Error("missing required flag", "flag", "exploit-key", "message", "exploit owner's public key for verifying payload signature")
 		os.Exit(1)
 	}
 
@@ -59,6 +65,13 @@ func main() {
 	ks, err := keystore.NewKeystore()
 	if err != nil {
 		logger.Error("failed to create keystore", "error", err)
+		os.Exit(1)
+	}
+
+	// Load exploit owner public key for verifying payload signature
+	exploitPubKey, err := loadPublicKey(*exploitPubKeyFile)
+	if err != nil {
+		logger.Error("failed to load exploit owner public key", "error", err, "file", *exploitPubKeyFile)
 		os.Exit(1)
 	}
 
@@ -86,6 +99,7 @@ func main() {
 		ArgsJSON:        []byte(*argsJSON),
 		ClientKeystore:  ks,
 		ClientKeyID:     *targetKeystoreKey,
+		PrincipalPubKey: exploitPubKey,
 		PentesterPubKey: harnessPubKey,
 		Expiration:      &expirationTime,
 	}

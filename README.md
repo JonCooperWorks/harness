@@ -1,3 +1,4 @@
+- WASM sandboxing: provides isolation boundaries (not perfect isolation - run on isolated, monitored systems)
 # Harness - Dual-Authorization Exploit Execution System
 
 A cryptographically secure system for storing, transporting, approving, and executing sensitive payloads including zero-day exploits and high-risk penetration testing tools. Harness enforces **dual-authorization** through cryptographic encryption and signatures, ensuring exploits cannot be executed without explicit approval from both the exploit owner (who encrypts the exploit) and the target (who signs execution arguments).
@@ -21,7 +22,7 @@ For offensive security teams and penetration testers who need to:
 **Nobody can run an exploit unilaterally:**
 
 1. **Exploit Owner** encrypts exploit and signs encrypted payload (has exploit, cannot authorize execution)
-2. **Target** decrypts envelope and signs execution arguments + expiration (has authorization, cannot decrypt exploit payload)
+2. **Target** decrypts envelope, verifies Exploit Owner signature (chain-of-custody), then signs execution arguments + expiration (has authorization, cannot decrypt exploit payload)
 3. **Harness (Pentester)** verifies signatures, decrypts, executes (needs both authorizations + valid expiration)
 
 **Result**: Execution requires exploit owner encryption + signature (control of payload) AND target signature (control of authorization). The envelope is encrypted to the target's public key (onion encryption), so an attacker with only the harness key cannot decrypt without also having the target key.
@@ -191,13 +192,14 @@ Plugin name is auto-loaded from the plugin. Exploit owner signs encrypted payloa
 ./bin/sign \
   -file exploit.encrypted \
   -target-keystore-key "target-key" \
+  -exploit-key exploit_public.pem \
   -harness-key harness_public.pem \
   -args '{"target":"192.168.1.100","port":443}' \
   -expiration 72h \
   -output exploit.approved
 ```
 
-Target decrypts envelope (proves key access), encrypts arguments with harness public key, signs payload hash + expiration + arguments. Default expiration: `72h` (examples: `24h`, `168h`, `30m`).
+Target decrypts envelope (proves key access), **verifies Exploit Owner signature** (ensures chain-of-custody), encrypts arguments with harness public key, signs payload hash + expiration + arguments. Default expiration: `72h` (examples: `24h`, `168h`, `30m`).
 
 ### 5. Execute Exploit
 
@@ -245,7 +247,7 @@ Harness implements the **HCEEP (Harness Cryptographic Execution Envelope Protoco
 ### High-Level Flow
 
 1. **Exploit Owner** encrypts the exploit payload and signs it, then encrypts the inner envelope to the target's public key (onion encryption)
-2. **Target** decrypts the envelope, signs execution arguments and expiration, creating an approved package
+2. **Target** decrypts the envelope, verifies Exploit Owner signature (ensures chain-of-custody), then signs execution arguments and expiration, creating an approved package
 3. **Harness** verifies both signatures, checks expiration, decrypts the payload, and executes it in a WASM sandbox
 
 ### Key Components
@@ -332,4 +334,3 @@ Helps meet compliance requirements (CREST, ISO 27001, SOC2, PCI DSS) through:
 - Encrypted exploits: safe over insecure channels
 - Signature verification: ensures payload authenticity and argument approval
 - Onion encryption: requires both harness and target keys to decrypt
-- WASM sandboxing: provides isolation boundaries (not perfect isolation - run on isolated, monitored systems)

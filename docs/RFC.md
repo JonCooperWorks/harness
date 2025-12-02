@@ -1,12 +1,16 @@
 
 # HCEEP — Harness Cryptographic Execution Envelope Protocol
 
-**Draft RFC 0.1**
+**Draft RFC 0.2**
 
 - **Status:** Draft  
 - **Author:** Jonathan Cooper  
 - **Intended Status:** Informational / Standards Track  
 - **Expires:** TBD
+
+### Changes from 0.1
+
+- **Target Approval Phase (5.2)**: Target now verifies Exploit Owner signature before signing, ensuring cryptographic chain-of-custody. This prevents targets from approving payloads that were not signed by the expected Exploit Owner.
 
 ---
 
@@ -97,7 +101,7 @@ The approved package is the complete, execution-ready asset containing all requi
 P → E_inner → E → A
 ```
 
-Cleartext payload is encrypted to produce inner envelope (`E_inner`). Inner envelope is encrypted to target's public key to produce encrypted envelope (E). Target decrypts E to `E_inner`, then signs to produce approved package (A). Approved package is decrypted and executed by Harness.
+Cleartext payload is encrypted to produce inner envelope (`E_inner`). Inner envelope is encrypted to target's public key to produce encrypted envelope (E). Target decrypts E to `E_inner`, verifies Exploit Owner signature (ensures chain-of-custody), then signs to produce approved package (A). Approved package is decrypted and executed by Harness.
 
 ---
 
@@ -119,7 +123,7 @@ HCEEP provides:
 ## 3. High-Level Protocol Overview
 
 - **Exploit Owner:** produces encrypted payload envelope (E), encrypted to target's public key  
-- **Target:** decrypts E, produces approved package (A)  
+- **Target:** decrypts E, verifies EO signature, produces approved package (A)  
 - **Harness:** verifies, decrypts, executes
 
 ### Execution requires:
@@ -212,21 +216,26 @@ Given **P** and target public key `pk_T`:
 
 ### 5.2. Target Approval Phase
 
-Given encrypted envelope **E**:
+Given encrypted envelope **E** and Exploit Owner public key `pk_EO`:
 
 1. Target decrypts **E** using `sk_T` → `E_inner`.
-2. Extract `H_payload` from `E_inner`.
-3. Encrypt arguments for Harness → `Enc_args` (X25519 + AES-256-GCM).
-4. Choose expiration `exp` (Unix seconds).
-5. Compute:
+2. Extract `sig_EO` and `H_payload` from `E_inner`.
+3. **Verify Exploit Owner signature** (ensures chain-of-custody):
+   ```
+   Ed25519_verify(pk_EO, H_payload, sig_EO)
+   ```
+   If verification fails, reject the envelope (payload not signed by expected Exploit Owner).
+4. Encrypt arguments for Harness → `Enc_args` (X25519 + AES-256-GCM).
+5. Choose expiration `exp` (Unix seconds).
+6. Compute:
    ```
    H_target = SHA256(H_payload || exp || Enc_args)
    ```
-6. T signs:
+7. T signs:
    ```
    sig_T = Ed25519_sign(sk_T, H_target)
    ```
-7. Append to `E_inner` → produce approved package **A**.
+8. Append to `E_inner` → produce approved package **A**.
 
 ### 5.3. Harness Execution Phase
 
@@ -438,13 +447,14 @@ This section defines a maximal-security configuration where:
 1. Pentester selects exploit by name/version (metadata only).
 2. Control plane fetches **E** without exposing ciphertext to the client.
 3. Target-HSM decrypts **E** using `sk_T` → `E_inner`.
-4. Client provides arguments in a UI.
-5. Control plane encrypts args using `pk_H` (via HSM).
-6. Control plane computes `H_target` from `E_inner`.
-7. Target-HSM signs `H_target`.
-8. Produce approved package **A** from `E_inner` + `sig_T` + expiration + `Enc_args`.
-9. Target never sees plaintext payload.
-10. `E_inner` is discarded after **A** is created.
+4. Control plane verifies Exploit Owner signature using `pk_EO` (ensures chain-of-custody).
+5. Client provides arguments in a UI.
+6. Control plane encrypts args using `pk_H` (via HSM).
+7. Control plane computes `H_target` from `E_inner`.
+8. Target-HSM signs `H_target`.
+9. Produce approved package **A** from `E_inner` + `sig_T` + expiration + `Enc_args`.
+10. Target never sees plaintext payload.
+11. `E_inner` is discarded after **A** is created.
 
 ### 10.4. Phase 2 — Execution (Remote)
 
