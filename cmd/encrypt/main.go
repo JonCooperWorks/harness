@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -81,52 +82,12 @@ func main() {
 	}
 	pluginName := plg.Name()
 
-	// Sign unencrypted payload with principal key
-	plaintextHash := sha256.Sum256(pluginData)
-	principalSignature, err := ks.Sign(*principalKeystoreKey, plaintextHash[:])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error signing unencrypted payload: %v\n", err)
-		os.Exit(1)
-	}
-
 	// Get principal public key for logging
 	principalPubKey, err := ks.GetPublicKey(*principalKeystoreKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting principal public key: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Calculate hash of plaintext exploit for logging
-	plaintextHashHex := hex.EncodeToString(plaintextHash[:])
-
-	// Calculate hash of principal signature for logging
-	principalSigHash := sha256.Sum256(principalSignature)
-	principalSigHashHex := hex.EncodeToString(principalSigHash[:])
-
-	// Calculate hash of principal public key for logging
-	principalPubKeyBytes, err := x509.MarshalPKIXPublicKey(principalPubKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling principal public key: %v\n", err)
-		os.Exit(1)
-	}
-	principalPubKeyHash := sha256.Sum256(principalPubKeyBytes)
-	principalPubKeyHashHex := hex.EncodeToString(principalPubKeyHash[:])
-
-	// Calculate hash of pentester's public key for logging
-	pubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling public key: %v\n", err)
-		os.Exit(1)
-	}
-	pubKeyHash := sha256.Sum256(pubKeyBytes)
-	pubKeyHashHex := hex.EncodeToString(pubKeyHash[:])
-
-	// Log encryption details
-	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] %s\n", time.Now().Format(time.RFC3339))
-	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Plaintext Exploit Hash (SHA256): %s\n", plaintextHashHex)
-	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Principal Signature Hash (SHA256): %s\n", principalSigHashHex)
-	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Principal Public Key Hash (SHA256): %s\n", principalPubKeyHashHex)
-	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Pentester Public Key Hash (SHA256): %s\n", pubKeyHashHex)
 
 	// Create payload (type is now a string identifier)
 	payload := crypto.Payload{
@@ -175,6 +136,57 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Build encrypted payload: [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	// This is what the principal signature will sign
+	var encryptedPayload []byte
+	metadataLenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(metadataLenBuf, uint32(len(metadataJSON)))
+	encryptedPayload = append(encryptedPayload, metadataLenBuf...)
+	encryptedPayload = append(encryptedPayload, metadataJSON...)
+	encryptedPayload = append(encryptedPayload, encryptedSymmetricKey...)
+	encryptedPayload = append(encryptedPayload, encryptedPluginData...)
+
+	// Sign encrypted payload hash with principal key (principal signature signs encrypted payload)
+	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
+	principalSignature, err := ks.Sign(*principalKeystoreKey, encryptedPayloadHash[:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error signing encrypted payload: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Calculate hash of plaintext exploit for logging
+	plaintextHash := sha256.Sum256(pluginData)
+	plaintextHashHex := hex.EncodeToString(plaintextHash[:])
+
+	// Calculate hash of principal signature for logging
+	principalSigHash := sha256.Sum256(principalSignature)
+	principalSigHashHex := hex.EncodeToString(principalSigHash[:])
+
+	// Calculate hash of principal public key for logging
+	principalPubKeyBytes, err := x509.MarshalPKIXPublicKey(principalPubKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling principal public key: %v\n", err)
+		os.Exit(1)
+	}
+	principalPubKeyHash := sha256.Sum256(principalPubKeyBytes)
+	principalPubKeyHashHex := hex.EncodeToString(principalPubKeyHash[:])
+
+	// Calculate hash of pentester's public key for logging
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling public key: %v\n", err)
+		os.Exit(1)
+	}
+	pubKeyHash := sha256.Sum256(pubKeyBytes)
+	pubKeyHashHex := hex.EncodeToString(pubKeyHash[:])
+
+	// Log encryption details
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] %s\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Plaintext Exploit Hash (SHA256): %s\n", plaintextHashHex)
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Principal Signature Hash (SHA256): %s\n", principalSigHashHex)
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Principal Public Key Hash (SHA256): %s\n", principalPubKeyHashHex)
+	fmt.Fprintf(os.Stderr, "[ENCRYPTION LOG] Pentester Public Key Hash (SHA256): %s\n", pubKeyHashHex)
+
 	// Build encrypted file structure with principal signature:
 	// [principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 	var output []byte
@@ -187,19 +199,8 @@ func main() {
 	// Write principal signature
 	output = append(output, principalSignature...)
 
-	// Write metadata length
-	metadataLenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(metadataLenBuf, uint32(len(metadataJSON)))
-	output = append(output, metadataLenBuf...)
-
-	// Write metadata
-	output = append(output, metadataJSON...)
-
-	// Write encrypted symmetric key
-	output = append(output, encryptedSymmetricKey...)
-
-	// Write encrypted plugin data
-	output = append(output, encryptedPluginData...)
+	// Write encrypted payload (already constructed above)
+	output = append(output, encryptedPayload...)
 
 	// Write to file
 	if err := os.WriteFile(*outputPath, output, 0644); err != nil {
@@ -242,20 +243,74 @@ func loadPublicKey(path string) (*ecdsa.PublicKey, error) {
 	return ecdsaPubKey, nil
 }
 
+// validatePublicKey validates that a public key point is on the curve and not at infinity
+func validatePublicKey(pubKey *ecdsa.PublicKey) error {
+	if pubKey == nil {
+		return fmt.Errorf("public key cannot be nil")
+	}
+	if pubKey.Curve == nil {
+		return fmt.Errorf("public key curve cannot be nil")
+	}
+	if pubKey.X == nil || pubKey.Y == nil {
+		return fmt.Errorf("public key point coordinates cannot be nil")
+	}
+	if !pubKey.Curve.IsOnCurve(pubKey.X, pubKey.Y) {
+		return fmt.Errorf("public key point is not on the curve")
+	}
+	return nil
+}
+
+// padSharedSecret pads a shared secret to exactly 32 bytes for consistent key derivation
+func padSharedSecret(secret []byte) []byte {
+	const keySize = 32
+	if len(secret) >= keySize {
+		return secret[len(secret)-keySize:]
+	}
+	padded := make([]byte, keySize)
+	copy(padded[keySize-len(secret):], secret)
+	return padded
+}
+
+// deriveKey derives a 32-byte AES key using HKDF-SHA256
+func deriveKey(sharedSecret []byte, context string) ([32]byte, error) {
+	paddedSecret := padSharedSecret(sharedSecret)
+	keyBytes, err := hkdf.Key(sha256.New, paddedSecret, nil, context, 32)
+	if err != nil {
+		var key [32]byte
+		return key, fmt.Errorf("failed to derive key: %w", err)
+	}
+	var key [32]byte
+	copy(key[:], keyBytes)
+	return key, nil
+}
+
 // encryptSymmetricKey encrypts the symmetric key using ECDH
 func encryptSymmetricKey(symmetricKey []byte, publicKey *ecdsa.PublicKey) ([]byte, error) {
+	// Validate public key
+	if err := validatePublicKey(publicKey); err != nil {
+		return nil, fmt.Errorf("invalid public key: %w", err)
+	}
+
 	// Generate ephemeral key pair for ECDH
 	ephemeralPrivate, err := ecdsa.GenerateKey(publicKey.Curve, rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate ephemeral key: %w", err)
 	}
 
+	// Validate ephemeral public key
+	if err := validatePublicKey(&ephemeralPrivate.PublicKey); err != nil {
+		return nil, fmt.Errorf("invalid ephemeral public key: %w", err)
+	}
+
 	// Compute shared secret using ECDH
 	sharedX, _ := publicKey.Curve.ScalarMult(publicKey.X, publicKey.Y, ephemeralPrivate.D.Bytes())
 	sharedSecret := sharedX.Bytes()
 
-	// Derive AES key from shared secret
-	aesKey := sha256.Sum256(sharedSecret)
+	// Derive AES key from shared secret using HKDF
+	aesKey, err := deriveKey(sharedSecret, "harness-symmetric-key-v1")
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive key: %w", err)
+	}
 
 	// Encrypt symmetric key with AES-GCM
 	nonce := make([]byte, 12) // GCM standard nonce size

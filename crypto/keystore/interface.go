@@ -16,11 +16,12 @@ type Keystore interface {
 	// Returns the ASN.1 DER-encoded ECDSA signature (R, S values)
 	Sign(keyID string, hash []byte) ([]byte, error)
 
-	// DecryptSymmetricKey decrypts a symmetric key encrypted via ECDH
+	// DecryptWithContext decrypts data encrypted via ECDH with a specific HKDF context
 	// The encryptedKey format is: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
 	// The private key never leaves secure storage - ECDH computation happens in hardware/cloud
-	// Returns the decrypted 32-byte AES-256 symmetric key
-	DecryptSymmetricKey(keyID string, encryptedKey []byte) ([]byte, error)
+	// Returns the decrypted data
+	// context specifies the HKDF context string (e.g., "harness-args-v1" for arguments)
+	DecryptWithContext(keyID string, encryptedKey []byte, context string) ([]byte, error)
 
 	// SetPrivateKey stores a private key in the keystore (for key generation/import)
 	// Note: For hardware-backed keystores, this may generate a key pair in hardware

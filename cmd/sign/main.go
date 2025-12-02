@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -94,8 +95,22 @@ func main() {
 	expirationTime := time.Now().Add(*expirationDur)
 	expirationUnix := expirationTime.Unix()
 
+	// Extract encrypted payload for hashing (everything after principal signature)
+	// Encrypted payload = [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	// Skip principal_sig_len (4 bytes) and principal_sig (variable)
+	if len(encryptedData) < 4 {
+		fmt.Fprintf(os.Stderr, "Error: encrypted file too short\n")
+		os.Exit(1)
+	}
+	principalSigLen := int(binary.BigEndian.Uint32(encryptedData[0:4]))
+	if len(encryptedData) < 4+principalSigLen {
+		fmt.Fprintf(os.Stderr, "Error: encrypted file too short for principal signature\n")
+		os.Exit(1)
+	}
+	encryptedPayload := encryptedData[4+principalSigLen:]
+
 	// Hash the encrypted payload to include in signature
-	encryptedPayloadHash := sha256.Sum256(encryptedData)
+	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
 	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
 
 	// Get client public key for logging
@@ -201,20 +216,74 @@ func loadPublicKey(path string) (*ecdsa.PublicKey, error) {
 	return ecdsaPubKey, nil
 }
 
+// validatePublicKey validates that a public key point is on the curve and not at infinity
+func validatePublicKey(pubKey *ecdsa.PublicKey) error {
+	if pubKey == nil {
+		return fmt.Errorf("public key cannot be nil")
+	}
+	if pubKey.Curve == nil {
+		return fmt.Errorf("public key curve cannot be nil")
+	}
+	if pubKey.X == nil || pubKey.Y == nil {
+		return fmt.Errorf("public key point coordinates cannot be nil")
+	}
+	if !pubKey.Curve.IsOnCurve(pubKey.X, pubKey.Y) {
+		return fmt.Errorf("public key point is not on the curve")
+	}
+	return nil
+}
+
+// padSharedSecret pads a shared secret to exactly 32 bytes for consistent key derivation
+func padSharedSecret(secret []byte) []byte {
+	const keySize = 32
+	if len(secret) >= keySize {
+		return secret[len(secret)-keySize:]
+	}
+	padded := make([]byte, keySize)
+	copy(padded[keySize-len(secret):], secret)
+	return padded
+}
+
+// deriveKey derives a 32-byte AES key using HKDF-SHA256
+func deriveKey(sharedSecret []byte, context string) ([32]byte, error) {
+	paddedSecret := padSharedSecret(sharedSecret)
+	keyBytes, err := hkdf.Key(sha256.New, paddedSecret, nil, context, 32)
+	if err != nil {
+		var key [32]byte
+		return key, fmt.Errorf("failed to derive key: %w", err)
+	}
+	var key [32]byte
+	copy(key[:], keyBytes)
+	return key, nil
+}
+
 // encryptArgs encrypts arguments using ECDH + AES-256-GCM (same method as encryptSymmetricKey)
 func encryptArgs(plaintext []byte, publicKey *ecdsa.PublicKey) ([]byte, error) {
+	// Validate public key
+	if err := validatePublicKey(publicKey); err != nil {
+		return nil, fmt.Errorf("invalid public key: %w", err)
+	}
+
 	// Generate ephemeral key pair for ECDH
 	ephemeralPrivate, err := ecdsa.GenerateKey(publicKey.Curve, rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate ephemeral key: %w", err)
 	}
 
+	// Validate ephemeral public key
+	if err := validatePublicKey(&ephemeralPrivate.PublicKey); err != nil {
+		return nil, fmt.Errorf("invalid ephemeral public key: %w", err)
+	}
+
 	// Compute shared secret using ECDH
 	sharedX, _ := publicKey.Curve.ScalarMult(publicKey.X, publicKey.Y, ephemeralPrivate.D.Bytes())
 	sharedSecret := sharedX.Bytes()
 
-	// Derive AES key from shared secret
-	aesKey := sha256.Sum256(sharedSecret)
+	// Derive AES key from shared secret using HKDF
+	aesKey, err := deriveKey(sharedSecret, "harness-args-v1")
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive key: %w", err)
+	}
 
 	// Encrypt with AES-GCM
 	nonce := make([]byte, 12) // GCM standard nonce size

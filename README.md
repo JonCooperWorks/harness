@@ -99,11 +99,15 @@ Go interface ([`crypto/keystore/Keystore`](crypto/keystore/interface.go)) provid
 type Keystore interface {
 	GetPublicKey(keyID string) (*ecdsa.PublicKey, error)
 	Sign(keyID string, hash []byte) ([]byte, error)
-	DecryptSymmetricKey(keyID string, encryptedKey []byte) ([]byte, error)
+	DecryptWithContext(keyID string, encryptedKey []byte, context string) ([]byte, error)
 	SetPrivateKey(keyID string, privateKey *ecdsa.PrivateKey) error
 	ListKeys() ([]string, error)
 }
 ```
+
+**DecryptWithContext**: Decrypts data encrypted via ECDH with a specific HKDF context string. The `context` parameter specifies the HKDF context used for key derivation:
+- `"harness-symmetric-key-v1"` for decrypting symmetric keys
+- `"harness-args-v1"` for decrypting execution arguments
 
 **Platform Implementations:**
 - **macOS**: Keychain Access (extensible to Secure Enclave)
@@ -266,7 +270,7 @@ See [Plugin API](#plugin-api) section for details.
 
 **Execution requires all four:**
 - ✓ Exploit encrypted with pentester's public key
-- ✓ Valid principal signature on unencrypted payload (verified after decryption)
+- ✓ Valid principal signature on encrypted payload hash (verified before decryption)
 - ✓ Valid client signature on encrypted payload hash + expiration + execution arguments
 - ✓ Expiration has not passed
 
@@ -377,7 +381,7 @@ All commands log cryptographic operations to stderr for audit trails and securit
 ### Cryptographic Flow
 
 1. **Encrypting Exploit** (Principal):
-   - Sign unencrypted payload with principal's private key (ECDSA)
+   - Encrypt payload first, then sign encrypted payload hash with principal's private key (ECDSA)
    - Generate AES-256 symmetric key
    - Encrypt payload with symmetric key (AES-256-GCM)
    - Encrypt symmetric key with pentester's public key (ECDH)
@@ -398,7 +402,7 @@ All commands log cryptographic operations to stderr for audit trails and securit
    - Verify client signature on encrypted payload hash + expiration + arguments
    - Decrypt symmetric key with private key (ECDH)
    - Decrypt exploit data with symmetric key (AES-256-GCM)
-   - Verify principal signature on decrypted payload (principal public key required)
+   - Verify principal signature on encrypted payload hash BEFORE decryption (principal public key required)
    - Log execution details (exploit hash, signatures)
    - Load WASM directly into sandbox
    - Execute with signed arguments
@@ -417,7 +421,7 @@ The encrypted exploit file format (after client signing) is:
 |-------|------|-------------|
 | `version` | 1 byte | Format version (must be 1). Includes principal signature and encrypted payload hash in signatures. |
 | `principal_sig_len` | 4 bytes | Big-endian uint32: length of principal signature in bytes |
-| `principal_sig` | variable | ASN.1 DER-encoded ECDSA signature (R, S values) signing the unencrypted payload |
+| `principal_sig` | variable | ASN.1 DER-encoded ECDSA signature (R, S values) signing the encrypted payload hash |
 | `metadata_length` | 4 bytes | Big-endian uint32: length of metadata JSON in bytes |
 | `metadata` | variable | JSON object containing encryption metadata |
 | `encrypted_symmetric_key` | variable | Encrypted AES-256 symmetric key (see format below) |
@@ -432,9 +436,10 @@ The encrypted exploit file format (after client signing) is:
 
 - **Algorithm**: ECDSA with P-256 curve
 - **Encoding**: ASN.1 DER format
-- **Signed Data**: SHA-256 hash of the unencrypted payload (before encryption)
-- **Purpose**: Ensures authenticity and integrity of the exploit payload
-- **Authorization**: Proves principal has reviewed and approved the specific exploit payload before encryption
+- **Signed Data**: SHA-256 hash of the encrypted payload: `SHA256([metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data])`
+- **Purpose**: Ensures authenticity and integrity of the encrypted payload
+- **Authorization**: Proves principal has reviewed and approved the specific encrypted payload
+- **Security**: Verified BEFORE decryption to prevent decryption of invalid payloads
 
 #### Client Signature Format
 
@@ -474,10 +479,11 @@ The symmetric key is encrypted using ECDH key exchange and AES-256-GCM:
 
 **Encryption Process:**
 1. Generate ephemeral ECDSA key pair (same curve as pentester public key)
-2. Compute shared secret via ECDH: `shared_secret = ECDH(ephemeral_private, pentester_public)`
-3. Derive AES-256 key: `aes_key = SHA256(shared_secret)`
-4. Encrypt symmetric key with AES-256-GCM using the derived key
-5. Prepend ephemeral public key and nonce to the ciphertext
+2. Validate ephemeral public key is on curve and not at infinity
+3. Compute shared secret via ECDH: `shared_secret = ECDH(ephemeral_private, pentester_public)`
+4. Derive AES-256 key using HKDF-SHA256: `aes_key = HKDF-SHA256(shared_secret, context, 32)` where context is "harness-symmetric-key-v1" for symmetric keys or "harness-args-v1" for arguments
+5. Encrypt symmetric key with AES-256-GCM using the derived key
+6. Prepend ephemeral public key and nonce to the ciphertext
 
 **Note**: The symmetric key is encrypted with the pentester's public key, allowing the pentester to decrypt and execute. The client separately signs the execution arguments + expiration to approve targeting.
 
@@ -519,7 +525,10 @@ The exploit payload is encrypted using AES-256-GCM:
 - **Authenticity**: ECDSA signature verifies arguments + expiration approval
 - **Integrity**: GCM authentication tags detect tampering
 - **Forward Secrecy**: Ephemeral keys for symmetric key encryption
-- **Key Exchange**: ECDH secure key derivation
+- **Key Exchange**: ECDH secure key derivation with HKDF-SHA256 for key derivation
+- **Ephemeral Key Validation**: All ephemeral public keys are validated to be on the curve and not at infinity
+- **Deterministic Parsing**: File format uses explicit deterministic forward parsing (no heuristics)
+- **Metadata Limits**: Hard limit of 10KB enforced on metadata size
 - **Dual Authorization**: Requires principal encryption + client signature
 
 ## Plugin API

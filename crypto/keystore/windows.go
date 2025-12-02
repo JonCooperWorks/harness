@@ -7,6 +7,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -126,8 +127,8 @@ func (w *WindowsKeystore) Sign(keyID string, hash []byte) ([]byte, error) {
 	return signature, nil
 }
 
-// DecryptSymmetricKey decrypts a symmetric key encrypted via ECDH
-func (w *WindowsKeystore) DecryptSymmetricKey(keyID string, encryptedKey []byte) ([]byte, error) {
+// DecryptWithContext decrypts data encrypted via ECDH with a specific HKDF context
+func (w *WindowsKeystore) DecryptWithContext(keyID string, encryptedKey []byte, context string) ([]byte, error) {
 	if len(encryptedKey) < 65 {
 		return nil, fmt.Errorf("encrypted key too short")
 	}
@@ -149,22 +150,30 @@ func (w *WindowsKeystore) DecryptSymmetricKey(keyID string, encryptedKey []byte)
 		Y:     y,
 	}
 
+	// Validate ephemeral public key
+	if err := validatePublicKey(ephemeralPubKey); err != nil {
+		return nil, fmt.Errorf("invalid ephemeral public key: %w", err)
+	}
+
 	// Compute shared secret using ECDH
 	sharedX, _ := ephemeralPubKey.Curve.ScalarMult(ephemeralPubKey.X, ephemeralPubKey.Y, privateKey.D.Bytes())
 	sharedSecret := sharedX.Bytes()
 
-	// Derive AES key from shared secret using SHA256
-	aesKey := sha256.Sum256(sharedSecret)
+	// Derive AES key from shared secret using HKDF with specified context
+	aesKey, err := deriveKey(sharedSecret, context)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive key: %w", err)
+	}
 
-	// Decrypt the symmetric key
-	encryptedSymmetricKey := encryptedKey[65:]
-	if len(encryptedSymmetricKey) < 12+16 {
-		return nil, fmt.Errorf("encrypted symmetric key too short")
+	// Decrypt the data
+	encryptedData := encryptedKey[65:]
+	if len(encryptedData) < 12+16 {
+		return nil, fmt.Errorf("encrypted data too short")
 	}
 
 	// Extract nonce (first 12 bytes)
-	nonce := encryptedSymmetricKey[:12]
-	ciphertext := encryptedSymmetricKey[12:]
+	nonce := encryptedData[:12]
+	ciphertext := encryptedData[12:]
 
 	block, err := aes.NewCipher(aesKey[:])
 	if err != nil {
@@ -180,10 +189,51 @@ func (w *WindowsKeystore) DecryptSymmetricKey(keyID string, encryptedKey []byte)
 	// Decrypt and verify authentication tag
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
+		return nil, fmt.Errorf("failed to decrypt: %w", err)
 	}
 
 	return plaintext, nil
+}
+
+// validatePublicKey validates that a public key point is on the curve and not at infinity
+func validatePublicKey(pubKey *ecdsa.PublicKey) error {
+	if pubKey == nil {
+		return fmt.Errorf("public key cannot be nil")
+	}
+	if pubKey.Curve == nil {
+		return fmt.Errorf("public key curve cannot be nil")
+	}
+	if pubKey.X == nil || pubKey.Y == nil {
+		return fmt.Errorf("public key point coordinates cannot be nil")
+	}
+	if !pubKey.Curve.IsOnCurve(pubKey.X, pubKey.Y) {
+		return fmt.Errorf("public key point is not on the curve")
+	}
+	return nil
+}
+
+// padSharedSecret pads a shared secret to exactly 32 bytes for consistent key derivation
+func padSharedSecret(secret []byte) []byte {
+	const keySize = 32
+	if len(secret) >= keySize {
+		return secret[len(secret)-keySize:]
+	}
+	padded := make([]byte, keySize)
+	copy(padded[keySize-len(secret):], secret)
+	return padded
+}
+
+// deriveKey derives a 32-byte AES key using HKDF-SHA256
+func deriveKey(sharedSecret []byte, context string) ([32]byte, error) {
+	paddedSecret := padSharedSecret(sharedSecret)
+	keyBytes, err := hkdf.Key(sha256.New, paddedSecret, nil, context, 32)
+	if err != nil {
+		var key [32]byte
+		return key, fmt.Errorf("failed to derive key: %w", err)
+	}
+	var key [32]byte
+	copy(key[:], keyBytes)
+	return key, nil
 }
 
 // ListKeys returns all key IDs stored in Windows Credential Store

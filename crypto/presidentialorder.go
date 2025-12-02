@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/hkdf"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/asn1"
@@ -113,276 +114,63 @@ func NewPresidentialOrderFromFile(privateKeyPath string, clientPubKey *ecdsa.Pub
 	}, nil
 }
 
-// VerifyAndDecrypt verifies the client signature on arguments and decrypts the payload
-// File format: [encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
-// Encrypted payload format: [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+// VerifyAndDecrypt verifies signatures and decrypts the payload
+// File format: [version:1][principal_sig_len:4][principal_sig][metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
+// Principal signature signs: SHA256([metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data])
 func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedResult, error) {
-	if len(fileData) < 12 {
+	const (
+		minFileSize     = 1 + 4 + 50 + 4 + 4 + 4 + 60 + 8 + 4 // version + principal_sig_len + min_sig + metadata_len + min_metadata + client_sig_len + min_sig + expiration + args_len
+		maxMetadataSize = 10000
+	)
+
+	if len(fileData) < minFileSize {
 		return nil, errors.New("file too short")
 	}
 
-	// Parse from the end: read client signature, expiration, and args
-	// File format (as written by sign command):
-	// [version:1 byte][encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
-	//
-	// Working backwards from the end:
-	// - args_json is the last N bytes (where N = args_len)
-	// - args_len is 4 bytes before args_json starts
-	// - expiration is 8 bytes before args_len
-	// - signature ends right before expiration
-	// - sig_len is 4 bytes before signature starts
-	// - version is 1 byte at the start (must be 1)
+	pos := 0
 
-	if len(fileData) < 21 {
-		return nil, errors.New("file too short")
+	// Read version (must be 1)
+	if fileData[pos] != 1 {
+		return nil, fmt.Errorf("unsupported file format version: %d (expected 1)", fileData[pos])
 	}
+	pos++
 
-	// Read version field (first byte, must be 1)
-	if fileData[0] != 1 {
-		return nil, fmt.Errorf("unsupported file format version: %d (expected 1)", fileData[0])
-	}
-
-	// Extract principal signature from the beginning
-	// Format: [version:1][principal_sig_len:4][principal_sig][encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
-	if len(fileData) < 1+4 {
+	// Read principal signature length
+	if pos+4 > len(fileData) {
 		return nil, errors.New("file too short for principal signature length")
 	}
-	principalSigLenPos := 1
-	principalSigLen := int(binary.BigEndian.Uint32(fileData[principalSigLenPos : principalSigLenPos+4]))
-	// ECDSA P-256 signatures in ASN.1 DER format are typically 70-72 bytes, but can vary
-	// Allow a wider range to accommodate variations in encoding
+	principalSigLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
 	if principalSigLen < 50 || principalSigLen > 120 {
-		return nil, fmt.Errorf("invalid principal signature length: %d (expected 50-120 bytes for ECDSA P-256). bytes at pos %d-%d: %x",
-			principalSigLen, principalSigLenPos, principalSigLenPos+4, fileData[principalSigLenPos:principalSigLenPos+4])
+		return nil, fmt.Errorf("invalid principal signature length: %d (expected 50-120 bytes)", principalSigLen)
 	}
-	if len(fileData) < principalSigLenPos+4+principalSigLen {
+	pos += 4
+
+	// Read principal signature
+	if pos+principalSigLen > len(fileData) {
 		return nil, errors.New("file too short for principal signature")
 	}
-	principalSignature := fileData[principalSigLenPos+4 : principalSigLenPos+4+principalSigLen]
-	encryptedPayloadStart := principalSigLenPos + 4 + principalSigLen
-
-	// Verify we're reading metadata_length from the correct position
-	// The encrypted file structure is: [principal_sig_len:4][principal_sig][metadata_length:4][metadata]...
-	// In the approved file, this starts at position 1 (after version byte)
-	// So metadata_length should be at: 1 + 4 + principalSigLen = encryptedPayloadStart
-	if encryptedPayloadStart+4 > len(fileData) {
-		return nil, fmt.Errorf("file too short: encryptedPayloadStart=%d, need %d bytes, have %d",
-			encryptedPayloadStart, encryptedPayloadStart+4, len(fileData))
-	}
-
-	// Read metadata_length from the expected position
-	metadataLenBytes := fileData[encryptedPayloadStart : encryptedPayloadStart+4]
-	metadataLenValue := binary.BigEndian.Uint32(metadataLenBytes)
-
-	// Validate metadata length is reasonable (JSON metadata should be < 10KB)
-	if metadataLenValue > 10000 {
-		// We're reading from the wrong position - the bytes don't look like a metadata length
-		// Check if maybe the principal signature length was read incorrectly
-		// Or if the file structure is different than expected
-		previewLen := 20
-		if len(fileData) < encryptedPayloadStart+previewLen {
-			previewLen = len(fileData) - encryptedPayloadStart
-		}
-		return nil, fmt.Errorf("invalid metadata length at position %d: %d (0x%x). This suggests wrong position. principalSigLen=%d (read from bytes %x at pos 1-4), bytes at expected metadata pos: %x",
-			encryptedPayloadStart, metadataLenValue, metadataLenValue, principalSigLen,
-			fileData[1:5], fileData[encryptedPayloadStart:encryptedPayloadStart+previewLen])
-	}
-
-	// Step 1: Read args_len from the last 4 bytes
-	// But wait - args_len tells us how long args_json is, and args_json comes AFTER args_len
-	// So: args_json is at the end, args_len is 4 bytes before args_json starts
-	// We need to find where args_len is by trying different positions
-
-	// Try reading args_len from positions near the end
-	// The args_len field tells us the length of args_json that follows it
-	var argsLenPos int
-	var fileArgsJSON []byte
-
-	foundArgsLen := false
-	// Try positions from the end (checking reasonable args_json lengths)
-	for offset := 4; offset < len(fileData) && offset < 1024*1024+4; offset++ {
-		argsLenPos = len(fileData) - offset
-		if argsLenPos < 0 {
-			break
-		}
-
-		// Read potential args_len
-		if argsLenPos+4 > len(fileData) {
-			continue
-		}
-		candidateArgsLen := int(binary.BigEndian.Uint32(fileData[argsLenPos : argsLenPos+4]))
-
-		// Check if encrypted_args would fit (starts right after args_len, ends at file end)
-		argsStart := argsLenPos + 4
-		expectedArgsEnd := argsStart + candidateArgsLen
-		if expectedArgsEnd == len(fileData) {
-			// Validate it looks like encrypted args
-			// Encrypted args format: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
-			// Minimum size is 65+12+16=93 bytes, and first byte should be 0x04 (uncompressed public key)
-			if candidateArgsLen > 0 && argsStart < len(fileData) {
-				encryptedArgs := fileData[argsStart : argsStart+candidateArgsLen]
-				if len(encryptedArgs) >= 93 && encryptedArgs[0] == 0x04 {
-					fileArgsJSON = encryptedArgs
-					foundArgsLen = true
-					break
-				}
-			} else if candidateArgsLen == 0 {
-				// Empty encrypted args is valid
-				fileArgsJSON = []byte{}
-				foundArgsLen = true
-				break
-			}
-		}
-	}
-
-	if !foundArgsLen {
-		return nil, errors.New("could not find valid args_len")
-	}
-
-	if !foundArgsLen {
-		return nil, errors.New("could not find valid args_len")
-	}
-
-	// Step 2: Read expiration (8 bytes before args_len)
-	expirationPos := argsLenPos - 8
-	if expirationPos < 0 {
-		return nil, errors.New("file too short for expiration")
-	}
-	expirationUnix := int64(binary.BigEndian.Uint64(fileData[expirationPos : expirationPos+8]))
-	expirationTime := time.Unix(expirationUnix, 0)
-
-	// Verify expiration has not passed
-	if time.Now().After(expirationTime) {
-		return nil, fmt.Errorf("payload has expired: expiration was %s, current time is %s", expirationTime.Format(time.RFC3339), time.Now().Format(time.RFC3339))
-	}
-
-	// Now we need to find the signature. The signature is before expiration.
-	// Structure: [encrypted_payload][client_sig_len:4][client_sig][expiration:8][args_len:4][args_json]
-	// The signature ends at expirationPos, so we need to find where it starts.
-	// ECDSA P-256 signatures are typically 70-72 bytes in ASN.1 DER format.
-
-	// Read backwards from expirationPos to find the signature length
-	// We'll check positions where sig_len could be (4 bytes before where sig would start)
-	// Signature lengths are typically 60-80 bytes for ECDSA P-256
-	foundSigLen := false
-	var clientSigLen int
-	var sigLenPos int
-
-	// Try reading signature length from positions before expirationPos
-	// We need at least 4 bytes for sig_len, so start from expirationPos - 4 - 80 (max sig len)
-	minPos := expirationPos - 4 - 80
-	if minPos < 0 {
-		minPos = 0
-	}
-
-	// Check positions backwards from expirationPos
-	for pos := expirationPos - 4 - 60; pos >= minPos && pos >= 0; pos-- {
-		// Read potential signature length
-		if pos+4 > expirationPos {
-			continue
-		}
-		sigLenCandidate := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
-
-		// Check if it's a reasonable signature length
-		if sigLenCandidate >= 60 && sigLenCandidate <= 80 {
-			// Check if signature would end exactly at expirationPos
-			sigStart := pos + 4
-			sigEnd := sigStart + sigLenCandidate
-			if sigEnd == expirationPos {
-				clientSigLen = sigLenCandidate
-				sigLenPos = pos
-				foundSigLen = true
-				break
-			}
-		}
-	}
-
-	if !foundSigLen {
-		return nil, errors.New("could not find valid signature length")
-	}
-
-	// Read client signature
-	sigPos := sigLenPos + 4
-	// Signature should end at expirationPos (8 bytes before args_len)
-	if sigPos+clientSigLen != expirationPos {
-		return nil, fmt.Errorf("signature position mismatch: expected sig to end at %d, but expiration starts at %d", sigPos+clientSigLen, expirationPos)
-	}
-	clientSignature := fileData[sigPos : sigPos+clientSigLen]
-	offset := sigLenPos
-
-	// Validate that encryptedPayloadStart is before offset
-	if encryptedPayloadStart >= offset {
-		return nil, fmt.Errorf("invalid payload boundaries: encryptedPayloadStart=%d, offset=%d, fileLen=%d", encryptedPayloadStart, offset, len(fileData))
-	}
-
-	// Validate that we have enough data
-	if offset > len(fileData) {
-		return nil, fmt.Errorf("offset exceeds file length: offset=%d, fileLen=%d", offset, len(fileData))
-	}
-	if encryptedPayloadStart > len(fileData) {
-		return nil, fmt.Errorf("encryptedPayloadStart exceeds file length: encryptedPayloadStart=%d, fileLen=%d", encryptedPayloadStart, len(fileData))
-	}
-
-	// Extract encrypted payload (everything before client signature, after version byte)
-	// When signing, the entire encrypted file (including principal signature) was hashed,
-	// so we need to include the principal signature here too
-	encryptedPayloadForHash := fileData[1:offset]              // Start after version byte, end before client signature
-	encryptedPayload := fileData[encryptedPayloadStart:offset] // For decryption, exclude principal signature
-
-	// Validate that encryptedPayload starts with metadata_length (should be a small reasonable value)
-	if len(encryptedPayload) < 4 {
-		return nil, fmt.Errorf("encrypted payload too short: got %d bytes, need at least 4", len(encryptedPayload))
-	}
-	// Check if the first 4 bytes look like a reasonable metadata length (should be < 10KB for JSON metadata)
-	firstFourBytes := binary.BigEndian.Uint32(encryptedPayload[0:4])
-	if firstFourBytes > 10000 {
-		previewLen := 16
-		if len(encryptedPayload) < previewLen {
-			previewLen = len(encryptedPayload)
-		}
-		return nil, fmt.Errorf("invalid metadata length at start of encrypted payload: %d (expected < 10000). encryptedPayloadStart=%d, offset=%d, firstBytes=%x", firstFourBytes, encryptedPayloadStart, offset, encryptedPayload[0:previewLen])
-	}
-
-	// Hash the encrypted payload (must match what was signed during sign command:
-	// [principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data])
-	encryptedPayloadHash := sha256.Sum256(encryptedPayloadForHash)
-
-	// Verify client signature: Signature covers encrypted_payload_hash (32 bytes) + expiration (8 bytes) + encrypted_args
-	// Note: fileArgsJSON is actually encrypted args at this point
-	encryptedArgs := fileArgsJSON
-	dataToVerify := make([]byte, 32+8+len(encryptedArgs))
-	copy(dataToVerify[0:32], encryptedPayloadHash[:])
-	binary.BigEndian.PutUint64(dataToVerify[32:40], uint64(expirationUnix))
-	copy(dataToVerify[40:], encryptedArgs)
-
-	dataHash := sha256.Sum256(dataToVerify)
-	var sig struct {
-		R, S *big.Int
-	}
-	if _, err := asn1.Unmarshal(clientSignature, &sig); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal client signature: %w", err)
-	}
-	if !ecdsa.Verify(po.clientPubKey, dataHash[:], sig.R, sig.S) {
-		return nil, errors.New("client signature verification failed (signature must cover encrypted payload hash, expiration, and arguments)")
-	}
-	if len(encryptedPayload) < 4 {
-		return nil, fmt.Errorf("encrypted payload too short: got %d bytes, need at least 4", len(encryptedPayload))
-	}
-
-	// Parse encrypted payload: [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
-	payloadOffset := 0
+	principalSignature := fileData[pos : pos+principalSigLen]
+	pos += principalSigLen
 
 	// Read metadata length
-	metadataLen := int(binary.BigEndian.Uint32(encryptedPayload[payloadOffset : payloadOffset+4]))
-	payloadOffset += 4
-
-	if len(encryptedPayload) < payloadOffset+metadataLen {
-		return nil, fmt.Errorf("invalid metadata length: metadataLen=%d, encryptedPayloadLen=%d, need %d bytes", metadataLen, len(encryptedPayload), payloadOffset+metadataLen)
+	if pos+4 > len(fileData) {
+		return nil, errors.New("file too short for metadata length")
 	}
+	metadataLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
+	if metadataLen > maxMetadataSize {
+		return nil, fmt.Errorf("metadata length %d exceeds maximum allowed size %d", metadataLen, maxMetadataSize)
+	}
+	if metadataLen < 0 {
+		return nil, fmt.Errorf("invalid metadata length: %d", metadataLen)
+	}
+	pos += 4
 
 	// Read metadata
-	metadata := encryptedPayload[payloadOffset : payloadOffset+metadataLen]
-	payloadOffset += metadataLen
+	if pos+metadataLen > len(fileData) {
+		return nil, errors.New("file too short for metadata")
+	}
+	metadata := fileData[pos : pos+metadataLen]
+	pos += metadataLen
 
 	// Parse metadata to get encrypted symmetric key length
 	var metadataStruct struct {
@@ -394,22 +182,114 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
 
-	// Remaining data is encrypted symmetric key + encrypted plugin data
-	encryptedData := encryptedPayload[payloadOffset:]
-	if len(encryptedData) < metadataStruct.SymmetricKeyLen+metadataStruct.PluginDataLen {
-		return nil, errors.New("encrypted data too short")
+	// Calculate encrypted payload hash for principal signature verification
+	// Encrypted payload = [metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	encryptedPayloadStart := pos - 4 - metadataLen // Start at metadata_len
+	encryptedPayloadEnd := pos + metadataStruct.SymmetricKeyLen + metadataStruct.PluginDataLen
+	if encryptedPayloadEnd > len(fileData) {
+		return nil, errors.New("file too short for encrypted payload")
+	}
+	encryptedPayload := fileData[encryptedPayloadStart:encryptedPayloadEnd]
+	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
+
+	// Verify principal signature BEFORE decryption (signs encrypted payload hash)
+	var principalSig struct {
+		R, S *big.Int
+	}
+	if _, err := asn1.Unmarshal(principalSignature, &principalSig); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal principal signature: %w", err)
+	}
+	if !ecdsa.Verify(po.principalPubKey, encryptedPayloadHash[:], principalSig.R, principalSig.S) {
+		return nil, errors.New("principal signature verification failed (signature must cover encrypted payload hash)")
 	}
 
-	// Extract encrypted symmetric key
-	encryptedSymmetricKey := encryptedData[:metadataStruct.SymmetricKeyLen]
-	encryptedPluginData := encryptedData[metadataStruct.SymmetricKeyLen : metadataStruct.SymmetricKeyLen+metadataStruct.PluginDataLen]
+	// Read encrypted symmetric key
+	if pos+metadataStruct.SymmetricKeyLen > len(fileData) {
+		return nil, errors.New("file too short for encrypted symmetric key")
+	}
+	encryptedSymmetricKey := fileData[pos : pos+metadataStruct.SymmetricKeyLen]
+	pos += metadataStruct.SymmetricKeyLen
+
+	// Read encrypted plugin data
+	if pos+metadataStruct.PluginDataLen > len(fileData) {
+		return nil, errors.New("file too short for encrypted plugin data")
+	}
+	encryptedPluginData := fileData[pos : pos+metadataStruct.PluginDataLen]
+	pos += metadataStruct.PluginDataLen
+
+	// Read client signature length
+	if pos+4 > len(fileData) {
+		return nil, errors.New("file too short for client signature length")
+	}
+	clientSigLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
+	if clientSigLen < 60 || clientSigLen > 80 {
+		return nil, fmt.Errorf("invalid client signature length: %d (expected 60-80 bytes)", clientSigLen)
+	}
+	pos += 4
+
+	// Read client signature
+	if pos+clientSigLen > len(fileData) {
+		return nil, errors.New("file too short for client signature")
+	}
+	clientSignature := fileData[pos : pos+clientSigLen]
+	pos += clientSigLen
+
+	// Read expiration
+	if pos+8 > len(fileData) {
+		return nil, errors.New("file too short for expiration")
+	}
+	expirationUnix := int64(binary.BigEndian.Uint64(fileData[pos : pos+8]))
+	expirationTime := time.Unix(expirationUnix, 0)
+	pos += 8
+
+	// Verify expiration has not passed
+	if time.Now().After(expirationTime) {
+		return nil, fmt.Errorf("payload has expired: expiration was %s, current time is %s", expirationTime.Format(time.RFC3339), time.Now().Format(time.RFC3339))
+	}
+
+	// Read encrypted args length
+	if pos+4 > len(fileData) {
+		return nil, errors.New("file too short for encrypted args length")
+	}
+	encryptedArgsLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
+	pos += 4
+
+	// Read encrypted args
+	if pos+encryptedArgsLen > len(fileData) {
+		return nil, errors.New("file too short for encrypted args")
+	}
+	encryptedArgs := fileData[pos : pos+encryptedArgsLen]
+	pos += encryptedArgsLen
+
+	// Verify we consumed all data
+	if pos != len(fileData) {
+		return nil, fmt.Errorf("file format error: expected %d bytes total, but file has %d bytes", pos, len(fileData))
+	}
+
+	// Verify client signature: Signature covers encrypted_payload_hash (32 bytes) + expiration (8 bytes) + encrypted_args
+	// Note: encryptedPayloadHash is computed from [metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	dataToVerify := make([]byte, 32+8+len(encryptedArgs))
+	copy(dataToVerify[0:32], encryptedPayloadHash[:])
+	binary.BigEndian.PutUint64(dataToVerify[32:40], uint64(expirationUnix))
+	copy(dataToVerify[40:], encryptedArgs)
+
+	dataHash := sha256.Sum256(dataToVerify)
+	var clientSig struct {
+		R, S *big.Int
+	}
+	if _, err := asn1.Unmarshal(clientSignature, &clientSig); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal client signature: %w", err)
+	}
+	if !ecdsa.Verify(po.clientPubKey, dataHash[:], clientSig.R, clientSig.S) {
+		return nil, errors.New("client signature verification failed (signature must cover encrypted payload hash, expiration, and arguments)")
+	}
 
 	// Decrypt symmetric key using pentester's private key (ECDH)
 	var symmetricKey []byte
 	var err error
 	if po.keystore != nil && po.keystoreKeyID != "" {
 		// Use keystore for decryption (keys never leave secure storage)
-		symmetricKey, err = po.keystore.DecryptSymmetricKey(po.keystoreKeyID, encryptedSymmetricKey)
+		symmetricKey, err = po.keystore.DecryptWithContext(po.keystoreKeyID, encryptedSymmetricKey, "harness-symmetric-key-v1")
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt symmetric key via keystore: %w", err)
 		}
@@ -433,19 +313,6 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	var payload Payload
 	if err := json.Unmarshal(pluginData, &payload); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal payload: %w", err)
-	}
-
-	// Verify principal signature against decrypted payload (principal public key is required)
-	// Principal signature signs the raw plugin file bytes (payload.Data), not the JSON-marshaled Payload
-	plaintextHash := sha256.Sum256(payload.Data)
-	var principalSig struct {
-		R, S *big.Int
-	}
-	if _, err := asn1.Unmarshal(principalSignature, &principalSig); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal principal signature: %w", err)
-	}
-	if !ecdsa.Verify(po.principalPubKey, plaintextHash[:], principalSig.R, principalSig.S) {
-		return nil, errors.New("principal signature verification failed (signature must cover unencrypted payload)")
 	}
 
 	// Decrypt arguments using pentester's private key (from keystore)
@@ -476,16 +343,16 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 
 // decryptArgs decrypts arguments using keystore (keys never leave secure storage)
 // The encrypted args format is: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
-// DecryptSymmetricKey can handle this format directly
+// Uses context "harness-args-v1" for key derivation (different from symmetric keys)
 func (po *PresidentialOrderImpl) decryptArgs(encryptedArgs []byte) ([]byte, error) {
 	if len(encryptedArgs) < 65+12+16 { // Need at least ephemeral key + nonce + tag
 		return nil, errors.New("encrypted args too short")
 	}
 
-	// Use keystore to decrypt (it will compute ECDH internally)
-	// DecryptSymmetricKey expects format: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
+	// Use keystore to decrypt with args-specific context
+	// DecryptWithContext expects format: [ephemeral_public_key:65][nonce:12][ciphertext+tag]
 	// which matches our encryptedArgs format
-	return po.keystore.DecryptSymmetricKey(po.keystoreKeyID, encryptedArgs)
+	return po.keystore.DecryptWithContext(po.keystoreKeyID, encryptedArgs, "harness-args-v1")
 }
 
 // decryptArgsWithKey decrypts arguments using in-memory private key (deprecated)
@@ -506,12 +373,20 @@ func (po *PresidentialOrderImpl) decryptArgsWithKey(encryptedArgs []byte, privat
 		Y:     y,
 	}
 
+	// Validate ephemeral public key
+	if err := validatePublicKey(ephemeralPubKey); err != nil {
+		return nil, fmt.Errorf("invalid ephemeral public key: %w", err)
+	}
+
 	// Compute shared secret using ECDH
 	sharedX, _ := ephemeralPubKey.Curve.ScalarMult(ephemeralPubKey.X, ephemeralPubKey.Y, privateKey.D.Bytes())
 	sharedSecret := sharedX.Bytes()
 
-	// Derive AES key from shared secret using SHA256
-	aesKey := sha256.Sum256(sharedSecret)
+	// Derive AES key from shared secret using HKDF
+	aesKey, err := deriveKey(sharedSecret, "harness-args-v1")
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive key: %w", err)
+	}
 
 	// Extract nonce and ciphertext
 	encryptedData := encryptedArgs[65:]
@@ -563,12 +438,20 @@ func (po *PresidentialOrderImpl) decryptSymmetricKey(encryptedKey []byte) ([]byt
 		Y:     y,
 	}
 
+	// Validate ephemeral public key
+	if err := validatePublicKey(pubKey); err != nil {
+		return nil, fmt.Errorf("invalid ephemeral public key: %w", err)
+	}
+
 	// Compute shared secret using ECDH
 	sharedX, _ := pubKey.Curve.ScalarMult(pubKey.X, pubKey.Y, po.privateKey.D.Bytes())
 	sharedSecret := sharedX.Bytes()
 
-	// Derive AES key from shared secret using SHA256
-	aesKey := sha256.Sum256(sharedSecret)
+	// Derive AES key from shared secret using HKDF
+	aesKey, err := deriveKey(sharedSecret, "harness-symmetric-key-v1")
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive key: %w", err)
+	}
 
 	// Decrypt the symmetric key
 	encryptedSymmetricKey := encryptedKey[65:]
@@ -658,4 +541,49 @@ func parsePrivateKey(keyData []byte) (*ecdsa.PrivateKey, error) {
 	}
 
 	return nil, errors.New("failed to parse private key: unsupported format")
+}
+
+// validatePublicKey validates that a public key point is on the curve and not at infinity
+func validatePublicKey(pubKey *ecdsa.PublicKey) error {
+	if pubKey == nil {
+		return errors.New("public key cannot be nil")
+	}
+	if pubKey.Curve == nil {
+		return errors.New("public key curve cannot be nil")
+	}
+	// Check if point is at infinity (both coordinates are zero or invalid)
+	if pubKey.X == nil || pubKey.Y == nil {
+		return errors.New("public key point coordinates cannot be nil")
+	}
+	// Check if point is on the curve
+	if !pubKey.Curve.IsOnCurve(pubKey.X, pubKey.Y) {
+		return errors.New("public key point is not on the curve")
+	}
+	return nil
+}
+
+// padSharedSecret pads a shared secret to exactly 32 bytes for consistent key derivation
+func padSharedSecret(secret []byte) []byte {
+	const keySize = 32
+	if len(secret) >= keySize {
+		// If already >= 32 bytes, take the last 32 bytes (rightmost)
+		return secret[len(secret)-keySize:]
+	}
+	// Pad with zeros on the left
+	padded := make([]byte, keySize)
+	copy(padded[keySize-len(secret):], secret)
+	return padded
+}
+
+// deriveKey derives a 32-byte AES key using HKDF-SHA256
+func deriveKey(sharedSecret []byte, context string) ([32]byte, error) {
+	paddedSecret := padSharedSecret(sharedSecret)
+	keyBytes, err := hkdf.Key(sha256.New, paddedSecret, nil, context, 32)
+	if err != nil {
+		var key [32]byte
+		return key, fmt.Errorf("failed to derive key: %w", err)
+	}
+	var key [32]byte
+	copy(key[:], keyBytes)
+	return key, nil
 }
