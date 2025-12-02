@@ -4,10 +4,16 @@
 package keystore
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
+	"math/big"
 
 	"github.com/99designs/keyring"
 )
@@ -85,6 +91,97 @@ func (w *WindowsKeystore) SetPrivateKey(keyID string, privateKey *ecdsa.PrivateK
 	return nil
 }
 
+// GetPublicKey retrieves the public key associated with a key ID
+func (w *WindowsKeystore) GetPublicKey(keyID string) (*ecdsa.PublicKey, error) {
+	privateKey, err := w.GetPrivateKey(keyID)
+	if err != nil {
+		return nil, err
+	}
+	return &privateKey.PublicKey, nil
+}
+
+// Sign signs the provided data hash using the private key associated with keyID
+func (w *WindowsKeystore) Sign(keyID string, hash []byte) ([]byte, error) {
+	privateKey, err := w.GetPrivateKey(keyID)
+	if err != nil {
+		return nil, err
+	}
+
+	r, s, err := ecdsa.Sign(rand.Reader, privateKey, hash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign: %w", err)
+	}
+
+	signature, err := asn1.Marshal(struct {
+		R, S *big.Int
+	}{R: r, S: s})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal signature: %w", err)
+	}
+
+	return signature, nil
+}
+
+// DecryptSymmetricKey decrypts a symmetric key encrypted via ECDH
+func (w *WindowsKeystore) DecryptSymmetricKey(keyID string, encryptedKey []byte) ([]byte, error) {
+	if len(encryptedKey) < 65 {
+		return nil, fmt.Errorf("encrypted key too short")
+	}
+
+	privateKey, err := w.GetPrivateKey(keyID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract ephemeral public key (uncompressed format: 0x04 || x || y)
+	pubKeyBytes := encryptedKey[:65]
+	x := new(big.Int).SetBytes(pubKeyBytes[1:33])
+	y := new(big.Int).SetBytes(pubKeyBytes[33:65])
+
+	// Create public key from point
+	ephemeralPubKey := &ecdsa.PublicKey{
+		Curve: privateKey.Curve,
+		X:     x,
+		Y:     y,
+	}
+
+	// Compute shared secret using ECDH
+	sharedX, _ := ephemeralPubKey.Curve.ScalarMult(ephemeralPubKey.X, ephemeralPubKey.Y, privateKey.D.Bytes())
+	sharedSecret := sharedX.Bytes()
+
+	// Derive AES key from shared secret using SHA256
+	aesKey := sha256.Sum256(sharedSecret)
+
+	// Decrypt the symmetric key
+	encryptedSymmetricKey := encryptedKey[65:]
+	if len(encryptedSymmetricKey) < 12+16 {
+		return nil, fmt.Errorf("encrypted symmetric key too short")
+	}
+
+	// Extract nonce (first 12 bytes)
+	nonce := encryptedSymmetricKey[:12]
+	ciphertext := encryptedSymmetricKey[12:]
+
+	block, err := aes.NewCipher(aesKey[:])
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	// Decrypt and verify authentication tag
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
+	}
+
+	return plaintext, nil
+}
+
 // ListKeys returns all key IDs stored in Windows Credential Store
 func (w *WindowsKeystore) ListKeys() ([]string, error) {
 	keys, err := w.ring.Keys()
@@ -93,4 +190,3 @@ func (w *WindowsKeystore) ListKeys() ([]string, error) {
 	}
 	return keys, nil
 }
-

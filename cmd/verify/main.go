@@ -13,9 +13,9 @@ import (
 
 func main() {
 	var (
-		encryptedFile     = flag.String("file", "", "Path to approved plugin file (with client signature)")
-		keystoreKeyID     = flag.String("keystore-key", "", "Key ID in OS keystore for pentester's private key (required)")
-		clientPubKeyFile  = flag.String("client-key", "", "Path to client's public key file (required)")
+		encryptedFile    = flag.String("file", "", "Path to approved plugin file (with client signature)")
+		keystoreKeyID    = flag.String("keystore-key", "", "Key ID in OS keystore for pentester's private key (required)")
+		clientPubKeyFile = flag.String("client-key", "", "Path to client's public key file (required)")
 	)
 	flag.Parse()
 

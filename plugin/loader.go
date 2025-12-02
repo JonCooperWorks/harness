@@ -25,4 +25,3 @@ func LoadPlugin(payload *crypto.Payload) (Plugin, error) {
 
 	return loader.Load(payload.Data, payload.Name)
 }
-

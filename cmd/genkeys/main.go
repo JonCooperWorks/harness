@@ -117,5 +117,3 @@ func loadPrivateKey(path string) (*ecdsa.PrivateKey, error) {
 
 	return ecKey, nil
 }
-
-

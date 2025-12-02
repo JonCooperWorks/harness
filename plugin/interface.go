@@ -19,4 +19,3 @@ type Plugin interface {
 	// Execute runs the plugin with the given context and JSON arguments
 	Execute(ctx context.Context, args json.RawMessage) (interface{}, error)
 }
-

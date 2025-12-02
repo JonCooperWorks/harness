@@ -32,7 +32,7 @@ type PresidentialOrder interface {
 
 // PresidentialOrderImpl implements the PresidentialOrder interface
 type PresidentialOrderImpl struct {
-	privateKey    *ecdsa.PrivateKey // Pentester's private key (for decryption)
+	privateKey    *ecdsa.PrivateKey // Pentester's private key (for decryption) - DEPRECATED: use keystore instead
 	clientPubKey  *ecdsa.PublicKey  // Client's public key (for verifying argument signature)
 	keystore      keystore.Keystore
 	keystoreKeyID string
@@ -66,13 +66,9 @@ func NewPresidentialOrderFromKeystore(keystoreKeyID string, clientPubKey *ecdsa.
 		return nil, fmt.Errorf("failed to create keystore: %w", err)
 	}
 
-	privateKey, err := ks.GetPrivateKey(keystoreKeyID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get private key from keystore: %w", err)
-	}
-
+	// Don't extract private key - use keystore operations directly
+	// This allows keys to remain in secure storage (HSM, cloud KMS, Secure Enclave, TPM)
 	return &PresidentialOrderImpl{
-		privateKey:    privateKey,
 		clientPubKey:  clientPubKey,
 		keystore:      ks,
 		keystoreKeyID: keystoreKeyID,
@@ -307,9 +303,22 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	encryptedPluginData := encryptedData[metadataStruct.SymmetricKeyLen : metadataStruct.SymmetricKeyLen+metadataStruct.PluginDataLen]
 
 	// Decrypt symmetric key using pentester's private key (ECDH)
-	symmetricKey, err := po.decryptSymmetricKey(encryptedSymmetricKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
+	var symmetricKey []byte
+	var err error
+	if po.keystore != nil && po.keystoreKeyID != "" {
+		// Use keystore for decryption (keys never leave secure storage)
+		symmetricKey, err = po.keystore.DecryptSymmetricKey(po.keystoreKeyID, encryptedSymmetricKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt symmetric key via keystore: %w", err)
+		}
+	} else if po.privateKey != nil {
+		// Fallback to in-memory private key (deprecated)
+		symmetricKey, err = po.decryptSymmetricKey(encryptedSymmetricKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
+		}
+	} else {
+		return nil, errors.New("no keystore or private key available for decryption")
 	}
 
 	// Decrypt plugin data using AES

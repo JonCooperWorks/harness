@@ -9,4 +9,3 @@ import "fmt"
 func NewWindowsKeystore() (Keystore, error) {
 	return nil, fmt.Errorf("Windows keystore is only available on Windows")
 }
-

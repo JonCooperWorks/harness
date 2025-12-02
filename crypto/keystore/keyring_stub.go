@@ -9,4 +9,3 @@ import "fmt"
 func NewKeyringKeystore() (Keystore, error) {
 	return nil, fmt.Errorf("Linux keyring keystore is only available on Linux")
 }
-

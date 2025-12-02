@@ -18,4 +18,3 @@ func NewKeystore() (Keystore, error) {
 		return nil, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
 }
-

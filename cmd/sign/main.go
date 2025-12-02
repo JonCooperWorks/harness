@@ -1,15 +1,11 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/asn1"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"math/big"
 	"os"
 	"time"
 
@@ -45,15 +41,10 @@ func main() {
 		*outputPath = *encryptedFile + ".approved"
 	}
 
-	// Load client's private key from keystore
+	// Load keystore (keys never leave secure storage)
 	ks, err := keystore.NewKeystore()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating keystore: %v\n", err)
-		os.Exit(1)
-	}
-	clientKey, err := ks.GetPrivateKey(*clientKeyID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading client's private key from keystore: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -75,7 +66,7 @@ func main() {
 	expirationTime := time.Now().Add(*expirationDur)
 	expirationUnix := expirationTime.Unix()
 
-	// Sign expiration + arguments together
+	// Sign expiration + arguments together using keystore (key never leaves secure storage)
 	argsBytes := []byte(*argsJSON)
 	// Create data to sign: expiration (8 bytes) + args_json
 	dataToSign := make([]byte, 8+len(argsBytes))
@@ -83,18 +74,9 @@ func main() {
 	copy(dataToSign[8:], argsBytes)
 
 	hash := sha256.Sum256(dataToSign)
-	r, s, err := ecdsa.Sign(rand.Reader, clientKey, hash[:])
+	signature, err := ks.Sign(*clientKeyID, hash[:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error signing arguments: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Encode signature
-	signature, err := asn1.Marshal(struct {
-		R, S *big.Int
-	}{R: r, S: s})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error encoding signature: %v\n", err)
 		os.Exit(1)
 	}
 

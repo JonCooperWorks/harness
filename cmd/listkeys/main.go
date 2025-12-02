@@ -33,4 +33,3 @@ func main() {
 		fmt.Printf("  - %s\n", keyID)
 	}
 }
-
