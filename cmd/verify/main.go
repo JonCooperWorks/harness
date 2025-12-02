@@ -21,10 +21,10 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
 	var (
-		encryptedFile     = flag.String("file", "", "Path to approved plugin file (with target signature)")
+		encryptedFile      = flag.String("file", "", "Path to approved plugin file (with target signature)")
 		harnessKeystoreKey = flag.String("harness-keystore-key", "", "Key ID in OS keystore for harness (pentester) private key (required, for decryption)")
-		targetPubKeyFile  = flag.String("target-key", "", "Path to target's public key file (required, for verifying argument signature)")
-		exploitPubKeyFile = flag.String("exploit-key", "", "Path to exploit owner's public key file (required, for verifying payload signature)")
+		targetPubKeyFile   = flag.String("target-key", "", "Path to target's public key file (required, for verifying argument signature)")
+		exploitPubKeyFile  = flag.String("exploit-key", "", "Path to exploit owner's public key file (required, for verifying payload signature)")
 	)
 	flag.Parse()
 

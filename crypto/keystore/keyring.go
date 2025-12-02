@@ -175,7 +175,6 @@ func (k *KeyringKeystore) DecryptWithContext(keyID string, encryptedKey []byte, 
 	return plaintext, nil
 }
 
-
 // padSharedSecret pads a shared secret to exactly 32 bytes for consistent key derivation
 func padSharedSecret(secret []byte) []byte {
 	const keySize = 32

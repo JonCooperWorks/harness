@@ -61,4 +61,3 @@ func ListRegisteredPlatforms() []string {
 	}
 	return platforms
 }
-

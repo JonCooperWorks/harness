@@ -63,4 +63,3 @@ func ListRegisteredPluginTypes() []string {
 	}
 	return types
 }
-

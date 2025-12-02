@@ -295,4 +295,3 @@ func encryptAES(plaintext, key []byte) ([]byte, error) {
 
 	return result, nil
 }
-

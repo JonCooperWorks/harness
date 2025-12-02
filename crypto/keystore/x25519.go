@@ -4,8 +4,8 @@ import (
 	"crypto/ed25519"
 	"crypto/sha512"
 
-	"golang.org/x/crypto/curve25519"
 	"filippo.io/edwards25519"
+	"golang.org/x/crypto/curve25519"
 )
 
 // Ed25519ToX25519PrivateKey converts an Ed25519 private key to an X25519 private key.
@@ -69,4 +69,3 @@ type keySizeError struct{}
 func (e *keySizeError) Error() string {
 	return "invalid key size"
 }
-

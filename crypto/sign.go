@@ -267,4 +267,3 @@ func encryptArgs(plaintext []byte, publicKey ed25519.PublicKey) ([]byte, error) 
 
 	return result, nil
 }
-

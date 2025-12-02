@@ -142,4 +142,3 @@ func (wp *WASMPlugin) callStringFunction(functionName string) (string, error) {
 
 	return string(resultBytes), nil
 }
-
