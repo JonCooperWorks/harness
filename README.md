@@ -533,7 +533,7 @@ The exploit payload is encrypted using AES-256-GCM:
 
 ## Plugin API
 
-Harness uses **Extism SDK** for WASM execution. Exploits must use **Extism PDK** and export:
+Harness uses **[Extism SDK](https://extism.org/)** for WASM execution. Exploits must use **[Extism PDK](https://extism.org/docs/quickstart/plugin-quickstart)** and export:
 
 ### Required Exported Functions
 
