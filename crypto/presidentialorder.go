@@ -4,19 +4,15 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ed25519"
-	"crypto/hkdf"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
+	"github.com/joncooperworks/harness/crypto/hceepcrypto"
 	"github.com/joncooperworks/harness/crypto/keystore"
-	"golang.org/x/crypto/curve25519"
 )
 
 // DecryptedResult contains both the decrypted payload and the execution arguments.
@@ -62,49 +58,10 @@ type PresidentialOrder interface {
 
 // PresidentialOrderImpl implements the PresidentialOrder interface
 type PresidentialOrderImpl struct {
-	privateKey      ed25519.PrivateKey // Pentester's private key (for decryption) - DEPRECATED: use keystore instead
-	clientPubKey    ed25519.PublicKey  // Client's public key (for verifying argument signature)
-	principalPubKey ed25519.PublicKey  // Principal's public key (for verifying payload signature)
+	clientPubKey    ed25519.PublicKey // Client's public key (for verifying argument signature)
+	principalPubKey ed25519.PublicKey // Principal's public key (for verifying payload signature)
 	keystore        keystore.Keystore
-	keystoreKeyID   string
-}
-
-// NewPresidentialOrderFromKeys creates a new PresidentialOrder from provided keys.
-//
-// DEPRECATED: Use NewPresidentialOrderFromKeystoreWithPrincipal instead.
-// Private keys should be stored in OS keystores, not loaded into memory.
-//
-// This function creates a PresidentialOrder using an in-memory private key.
-// The privateKey is the pentester's private key for decryption.
-// The clientPubKey is the client's public key for verifying argument signatures.
-func NewPresidentialOrderFromKeys(privateKey ed25519.PrivateKey, clientPubKey ed25519.PublicKey) (PresidentialOrder, error) {
-	if len(privateKey) == 0 {
-		return nil, errors.New("private key cannot be empty")
-	}
-	if len(clientPubKey) == 0 {
-		return nil, errors.New("client public key cannot be empty")
-	}
-	return &PresidentialOrderImpl{
-		privateKey:   privateKey,
-		clientPubKey: clientPubKey,
-	}, nil
-}
-
-// NewPresidentialOrderFromKeystore creates a new PresidentialOrder loading the private key from OS keystore.
-//
-// DEPRECATED: Use NewPresidentialOrderFromKeystoreWithPrincipal instead.
-// Principal signature verification is required for security.
-//
-// This function creates a PresidentialOrder using a private key stored in the OS keystore.
-// The keystoreKeyID identifies the pentester's private key in the keystore.
-// The clientPubKey is the client's public key for verifying argument signatures.
-//
-// Note: This function does not include principal signature verification.
-// Use NewPresidentialOrderFromKeystoreWithPrincipal for full security.
-func NewPresidentialOrderFromKeystore(keystoreKeyID string, clientPubKey ed25519.PublicKey) (PresidentialOrder, error) {
-	// Create a zero-value principal key (will fail verification if used)
-	var zeroPrincipalKey ed25519.PublicKey
-	return NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID, clientPubKey, zeroPrincipalKey)
+	keystoreKeyID   keystore.KeyID
 }
 
 // NewPresidentialOrderFromKeystoreWithPrincipal creates a new PresidentialOrder with principal public key.
@@ -119,7 +76,7 @@ func NewPresidentialOrderFromKeystore(keystoreKeyID string, clientPubKey ed25519
 //
 // The private key never leaves secure storage - all decryption operations happen
 // through the keystore interface, allowing hardware-backed or cloud-based key storage.
-func NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID string, clientPubKey ed25519.PublicKey, principalPubKey ed25519.PublicKey) (PresidentialOrder, error) {
+func NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID keystore.KeyID, clientPubKey ed25519.PublicKey, principalPubKey ed25519.PublicKey) (PresidentialOrder, error) {
 	if keystoreKeyID == "" {
 		return nil, errors.New("keystore key ID cannot be empty")
 	}
@@ -142,41 +99,6 @@ func NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID string, clientP
 		principalPubKey: principalPubKey,
 		keystore:        ks,
 		keystoreKeyID:   keystoreKeyID,
-	}, nil
-}
-
-// NewPresidentialOrderFromFile creates a new PresidentialOrder loading the private key from a file.
-//
-// DEPRECATED: Use NewPresidentialOrderFromKeystoreWithPrincipal instead.
-// Private keys should be stored in OS keystores, not in files.
-//
-// This function creates a PresidentialOrder using a private key loaded from a file.
-// The privateKeyPath is the path to a PEM-encoded private key file.
-// The clientPubKey is the client's public key for verifying argument signatures.
-//
-// Security Warning: Loading private keys from files exposes them to the filesystem
-// and process memory. Use OS keystore integration instead.
-func NewPresidentialOrderFromFile(privateKeyPath string, clientPubKey ed25519.PublicKey) (PresidentialOrder, error) {
-	if privateKeyPath == "" {
-		return nil, errors.New("private key path cannot be empty")
-	}
-	if len(clientPubKey) == 0 {
-		return nil, errors.New("client public key cannot be empty")
-	}
-
-	keyData, err := os.ReadFile(privateKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read private key file: %w", err)
-	}
-
-	privateKey, err := parsePrivateKey(keyData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key: %w", err)
-	}
-
-	return &PresidentialOrderImpl{
-		privateKey:   privateKey,
-		clientPubKey: clientPubKey,
 	}, nil
 }
 
@@ -378,23 +300,13 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, errors.New("client signature verification failed (signature must cover encrypted payload hash, expiration, and arguments)")
 	}
 
-	// Decrypt symmetric key using pentester's private key (ECDH)
-	var symmetricKey []byte
-	var err error
-	if po.keystore != nil && po.keystoreKeyID != "" {
-		// Use keystore for decryption (keys never leave secure storage)
-		symmetricKey, err = po.keystore.DecryptWithContext(po.keystoreKeyID, encryptedSymmetricKey, "harness-symmetric-key-v1")
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt symmetric key via keystore: %w", err)
-		}
-	} else if po.privateKey != nil {
-		// Fallback to in-memory private key (deprecated)
-		symmetricKey, err = po.decryptSymmetricKey(encryptedSymmetricKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
-		}
-	} else {
-		return nil, errors.New("no keystore or private key available for decryption")
+	// Create EnvelopeCipher for harness
+	enc := hceepcrypto.NewEnvelopeCipher(po.keystore, po.keystoreKeyID)
+
+	// Decrypt symmetric key using EnvelopeCipher
+	symmetricKey, err := enc.DecryptFromPeer(hceepcrypto.ContextSymmetricKey, encryptedSymmetricKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
 	}
 
 	// Decrypt plugin data using AES
@@ -409,22 +321,10 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, fmt.Errorf("failed to unmarshal payload: %w", err)
 	}
 
-	// Decrypt arguments using pentester's private key (from keystore)
-	var decryptedArgs []byte
-	if po.keystore != nil && po.keystoreKeyID != "" {
-		// Use keystore for decryption (keys never leave secure storage)
-		decryptedArgs, err = po.decryptArgs(encryptedArgs)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt arguments: %w", err)
-		}
-	} else if po.privateKey != nil {
-		// Fallback to in-memory private key (deprecated)
-		decryptedArgs, err = po.decryptArgsWithKey(encryptedArgs, po.privateKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt arguments: %w", err)
-		}
-	} else {
-		return nil, errors.New("no keystore or private key available for argument decryption")
+	// Decrypt arguments using EnvelopeCipher
+	decryptedArgs, err := enc.DecryptFromPeer(hceepcrypto.ContextArgs, encryptedArgs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt arguments: %w", err)
 	}
 
 	return &DecryptedResult{
@@ -433,131 +333,6 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		ClientSignature:    clientSignature,
 		PrincipalSignature: principalSignature,
 	}, nil
-}
-
-// decryptArgs decrypts arguments using keystore (keys never leave secure storage)
-// The encrypted args format is: [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
-// Uses context "harness-args-v1" for key derivation (different from symmetric keys)
-func (po *PresidentialOrderImpl) decryptArgs(encryptedArgs []byte) ([]byte, error) {
-	if len(encryptedArgs) < 32+12+16 { // Need at least ephemeral key + nonce + tag
-		return nil, errors.New("encrypted args too short")
-	}
-
-	// Use keystore to decrypt with args-specific context
-	// DecryptWithContext expects format: [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
-	// which matches our encryptedArgs format
-	return po.keystore.DecryptWithContext(po.keystoreKeyID, encryptedArgs, "harness-args-v1")
-}
-
-// decryptArgsWithKey decrypts arguments using in-memory private key (deprecated)
-func (po *PresidentialOrderImpl) decryptArgsWithKey(encryptedArgs []byte, privateKey ed25519.PrivateKey) ([]byte, error) {
-	if len(encryptedArgs) < 32+12+16 { // Need at least ephemeral key + nonce + tag
-		return nil, errors.New("encrypted args too short")
-	}
-
-	// Extract ephemeral X25519 public key (32 bytes)
-	ephemeralX25519PubKey := encryptedArgs[:32]
-
-	// Convert Ed25519 private key to X25519
-	x25519PrivateKey, err := keystore.Ed25519ToX25519PrivateKey(privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert private key to X25519: %w", err)
-	}
-
-	// Compute shared secret using X25519
-	var sharedSecret [32]byte
-	curve25519.ScalarMult(&sharedSecret, (*[32]byte)(x25519PrivateKey), (*[32]byte)(ephemeralX25519PubKey))
-
-	// Derive AES key from shared secret using HKDF
-	aesKey, err := deriveKey(sharedSecret[:], "harness-args-v1")
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive key: %w", err)
-	}
-
-	// Extract nonce and ciphertext
-	encryptedData := encryptedArgs[32:]
-	if len(encryptedData) < 12+16 { // Need at least nonce (12) + tag (16)
-		return nil, errors.New("encrypted args data too short")
-	}
-
-	nonce := encryptedData[:12]
-	ciphertext := encryptedData[12:]
-
-	block, err := aes.NewCipher(aesKey[:])
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cipher: %w", err)
-	}
-
-	// Create GCM mode
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %w", err)
-	}
-
-	// Decrypt and verify authentication tag
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt args: %w", err)
-	}
-
-	return plaintext, nil
-}
-
-// decryptSymmetricKey decrypts the symmetric key using X25519 key exchange
-func (po *PresidentialOrderImpl) decryptSymmetricKey(encryptedKey []byte) ([]byte, error) {
-	// For X25519 key exchange, the encrypted key contains the X25519 public key and the encrypted symmetric key
-
-	if len(encryptedKey) < 32 { // 32 bytes X25519 public key
-		return nil, errors.New("encrypted key too short")
-	}
-
-	// Extract ephemeral X25519 public key (32 bytes)
-	ephemeralX25519PubKey := encryptedKey[:32]
-
-	// Convert Ed25519 private key to X25519
-	x25519PrivateKey, err := keystore.Ed25519ToX25519PrivateKey(po.privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert private key to X25519: %w", err)
-	}
-
-	// Compute shared secret using X25519
-	var sharedSecret [32]byte
-	curve25519.ScalarMult(&sharedSecret, (*[32]byte)(x25519PrivateKey), (*[32]byte)(ephemeralX25519PubKey))
-
-	// Derive AES key from shared secret using HKDF
-	aesKey, err := deriveKey(sharedSecret[:], "harness-symmetric-key-v1")
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive key: %w", err)
-	}
-
-	// Decrypt the symmetric key
-	encryptedSymmetricKey := encryptedKey[32:]
-	if len(encryptedSymmetricKey) < 12+16 { // Need at least nonce (12) + tag (16)
-		return nil, errors.New("encrypted symmetric key too short")
-	}
-
-	// Extract nonce (first 12 bytes)
-	nonce := encryptedSymmetricKey[:12]
-	ciphertext := encryptedSymmetricKey[12:]
-
-	block, err := aes.NewCipher(aesKey[:])
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cipher: %w", err)
-	}
-
-	// Create GCM mode
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %w", err)
-	}
-
-	// Decrypt and verify authentication tag
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
-	}
-
-	return plaintext, nil
 }
 
 // decryptAES decrypts data using AES-256-GCM
@@ -592,55 +367,4 @@ func decryptAES(ciphertext, key []byte) ([]byte, error) {
 	}
 
 	return plaintext, nil
-}
-
-// parsePrivateKey parses a private key from various formats
-func parsePrivateKey(keyData []byte) (ed25519.PrivateKey, error) {
-	// Try PEM format first
-	block, _ := pem.Decode(keyData)
-	if block != nil {
-		keyData = block.Bytes
-	}
-
-	// Try PKCS8 format
-	key, err := x509.ParsePKCS8PrivateKey(keyData)
-	if err == nil {
-		if ed25519Key, ok := key.(ed25519.PrivateKey); ok {
-			return ed25519Key, nil
-		}
-		return nil, errors.New("key is not Ed25519")
-	}
-
-	// Try raw Ed25519 private key (64 bytes)
-	if len(keyData) == ed25519.PrivateKeySize {
-		return ed25519.PrivateKey(keyData), nil
-	}
-
-	return nil, errors.New("failed to parse private key: unsupported format")
-}
-
-// padSharedSecret pads a shared secret to exactly 32 bytes for consistent key derivation
-func padSharedSecret(secret []byte) []byte {
-	const keySize = 32
-	if len(secret) >= keySize {
-		// If already >= 32 bytes, take the last 32 bytes (rightmost)
-		return secret[len(secret)-keySize:]
-	}
-	// Pad with zeros on the left
-	padded := make([]byte, keySize)
-	copy(padded[keySize-len(secret):], secret)
-	return padded
-}
-
-// deriveKey derives a 32-byte AES key using HKDF-SHA256
-func deriveKey(sharedSecret []byte, context string) ([32]byte, error) {
-	paddedSecret := padSharedSecret(sharedSecret)
-	keyBytes, err := hkdf.Key(sha256.New, paddedSecret, nil, context, 32)
-	if err != nil {
-		var key [32]byte
-		return key, fmt.Errorf("failed to derive key: %w", err)
-	}
-	var key [32]byte
-	copy(key[:], keyBytes)
-	return key, nil
 }

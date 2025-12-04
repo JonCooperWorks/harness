@@ -6,11 +6,21 @@ package keystore
 
 import "crypto/ed25519"
 
-// Keystore interface for cryptographic operations without exposing private keys.
+// KeyID selects which local key in this keystore to use.
+// It does NOT change algorithms – just which Ed25519/X25519 pair.
+type KeyID string
+
+// Keystore represents this program's cryptographic backend.
 //
-// This design allows keys to remain in secure storage (HSMs, cloud KMS, Secure Enclave, TPM)
-// and never be loaded into host memory. Implementations can swap in hardware-backed
-// or cloud-based key storage transparently.
+// Implementations may be:
+//   - OS keystore
+//   - HSM / cloud KMS
+//   - in-memory (for dev/tests)
+//
+// It never exposes private keys. It only:
+//   - returns public keys for a given keyID
+//   - signs digests with Ed25519
+//   - does X25519 ECDH with the peer's public key
 //
 // Platform-specific implementations are available for:
 //   - macOS: Keychain Access
@@ -20,34 +30,36 @@ import "crypto/ed25519"
 // Custom implementations can be registered using RegisterKeystore to support
 // additional platforms or keystore backends (e.g., cloud KMS, TPM).
 type Keystore interface {
-	// GetPublicKey retrieves the public key associated with a key ID.
-	// This is safe to expose as public keys are not sensitive.
-	GetPublicKey(keyID string) (ed25519.PublicKey, error)
+	// PublicEd25519 returns the Ed25519 public key for keyID.
+	PublicEd25519(id KeyID) (ed25519.PublicKey, error)
 
-	// Sign signs the provided data hash using the private key associated with keyID.
-	// The private key never leaves secure storage (HSM, cloud KMS, Secure Enclave, TPM).
-	// Returns the raw Ed25519 signature (64 bytes).
-	Sign(keyID string, hash []byte) ([]byte, error)
+	// PublicX25519 returns the X25519 public key for keyID (32 bytes).
+	PublicX25519(id KeyID) ([32]byte, error)
 
-	// DecryptWithContext decrypts data encrypted via X25519 with a specific HKDF context.
+	// SignDigest signs a canonical digest with the Ed25519 private key for keyID.
 	//
-	// The encryptedKey format is: [ephemeral_public_key:32][nonce:12][ciphertext+tag]
-	// The private key never leaves secure storage - X25519 computation happens in hardware/cloud.
+	// In HCEEP this is used for:
+	//   - EO: H_payload
+	//   - Target: H_target
 	//
-	// The context parameter specifies the HKDF context string used for key derivation:
-	//   - "harness-symmetric-key-v1" for decrypting symmetric keys
-	//   - "harness-args-v1" for decrypting execution arguments
-	//   - "harness-envelope-v1" for decrypting envelopes (onion encryption)
+	// Callers are responsible for constructing the correct digest as per the RFC.
+	SignDigest(id KeyID, digest []byte) ([]byte, error)
+
+	// ECDH computes X25519(shared = sk(id) ⊗ peerPublic).
 	//
-	// Returns the decrypted data.
-	DecryptWithContext(keyID string, encryptedKey []byte, context string) ([]byte, error)
+	// In HCEEP this is used for:
+	//   - Target: decrypt outer envelope E
+	//   - Harness: unwrap Enc_K_sym and Enc_args
+	//
+	// Callers then run HKDF + AES-GCM using this shared secret.
+	ECDH(id KeyID, peerPublic [32]byte) (sharedSecret [32]byte, err error)
 
 	// SetPrivateKey stores a private key in the keystore (for key generation/import).
 	// Note: For hardware-backed keystores, this may generate a key pair in hardware
 	// and only store a reference. The actual private key material may never be accessible.
-	SetPrivateKey(keyID string, privateKey ed25519.PrivateKey) error
+	SetPrivateKey(id KeyID, privateKey ed25519.PrivateKey) error
 
 	// ListKeys returns all key IDs stored in the keystore.
 	// This can be used to discover available keys or verify key existence.
-	ListKeys() ([]string, error)
+	ListKeys() ([]KeyID, error)
 }

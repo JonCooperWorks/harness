@@ -1,10 +1,7 @@
 package crypto
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
@@ -13,8 +10,8 @@ import (
 	"io"
 	"time"
 
+	"github.com/joncooperworks/harness/crypto/hceepcrypto"
 	"github.com/joncooperworks/harness/crypto/keystore"
-	"golang.org/x/crypto/curve25519"
 )
 
 // SignEncryptedPluginRequest contains all the information needed to sign an encrypted plugin.
@@ -38,7 +35,7 @@ type SignEncryptedPluginRequest struct {
 	ClientKeystore keystore.Keystore
 	// ClientKeyID is the key ID in the keystore for the client's (target's) private key.
 	// This key is used to decrypt the envelope and sign the approval of execution arguments and expiration.
-	ClientKeyID string
+	ClientKeyID keystore.KeyID
 	// PrincipalPubKey is the exploit owner's (principal's) public key for verifying the payload signature.
 	// The exploit owner signature is verified before the target signs, ensuring cryptographic chain-of-custody.
 	PrincipalPubKey ed25519.PublicKey
@@ -102,6 +99,17 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 		return nil, errors.New("pentester public key cannot be nil")
 	}
 
+	// Create EnvelopeCipher for target
+	enc := hceepcrypto.NewEnvelopeCipher(req.ClientKeystore, req.ClientKeyID)
+
+	// Convert pentester public key to X25519
+	pentesterPubX, err := keystore.Ed25519ToX25519PublicKey(req.PentesterPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert pentester public key to X25519: %w", err)
+	}
+	var pentesterPubX32 [32]byte
+	copy(pentesterPubX32[:], pentesterPubX)
+
 	// Read all encrypted envelope data
 	encryptedEnvelope, err := io.ReadAll(req.EncryptedData)
 	if err != nil {
@@ -109,8 +117,7 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	}
 
 	// Decrypt the envelope using target's private key
-	// Format: [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
-	innerEnvelope, err := req.ClientKeystore.DecryptWithContext(req.ClientKeyID, encryptedEnvelope, "harness-envelope-v1")
+	innerEnvelope, err := enc.DecryptFromPeer(hceepcrypto.ContextEnvelope, encryptedEnvelope)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt envelope: %w", err)
 	}
@@ -125,7 +132,7 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	}
 
 	// Encrypt arguments with pentester's public key
-	encryptedArgs, err := encryptArgs(req.ArgsJSON, req.PentesterPubKey)
+	encryptedArgs, err := enc.EncryptToPeer(pentesterPubX32, hceepcrypto.ContextArgs, req.ArgsJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt arguments: %w", err)
 	}
@@ -185,7 +192,7 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	copy(dataToSign[40:], encryptedArgs)
 
 	hash := sha256.Sum256(dataToSign)
-	signature, err := req.ClientKeystore.Sign(req.ClientKeyID, hash[:])
+	signature, err := req.ClientKeystore.SignDigest(req.ClientKeyID, hash[:])
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign payload and arguments: %w", err)
 	}
@@ -227,75 +234,4 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 		ApprovedData:   output,
 		ExpirationTime: expirationTime,
 	}, nil
-}
-
-// encryptArgs encrypts arguments using X25519 + AES-256-GCM (same method as encryptSymmetricKey)
-func encryptArgs(plaintext []byte, publicKey ed25519.PublicKey) ([]byte, error) {
-	if len(publicKey) != ed25519.PublicKeySize {
-		return nil, errors.New("invalid public key size")
-	}
-
-	// Generate ephemeral Ed25519 key pair
-	ephemeralPublic, ephemeralPrivate, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate ephemeral key: %w", err)
-	}
-
-	// Convert Ed25519 keys to X25519 for key exchange
-	ephemeralX25519Private, err := keystore.Ed25519ToX25519PrivateKey(ephemeralPrivate)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert ephemeral private key to X25519: %w", err)
-	}
-
-	pentesterX25519Public, err := keystore.Ed25519ToX25519PublicKey(publicKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert pentester public key to X25519: %w", err)
-	}
-
-	// Compute shared secret using X25519
-	var sharedSecret [32]byte
-	curve25519.ScalarMult(&sharedSecret, (*[32]byte)(ephemeralX25519Private), (*[32]byte)(pentesterX25519Public))
-
-	// Derive AES key from shared secret using HKDF
-	aesKey, err := deriveKey(sharedSecret[:], "harness-args-v1")
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive key: %w", err)
-	}
-
-	// Encrypt with AES-GCM
-	nonce := make([]byte, 12) // GCM standard nonce size
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("failed to generate nonce: %w", err)
-	}
-
-	block, err := aes.NewCipher(aesKey[:])
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cipher: %w", err)
-	}
-
-	// Encrypt with GCM
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %w", err)
-	}
-
-	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
-
-	// Build result: [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
-	result := make([]byte, 0, 32+12+len(ciphertext))
-
-	// Encode ephemeral X25519 public key (32 bytes)
-	ephemeralX25519PubBytes, err := keystore.Ed25519ToX25519PublicKey(ephemeralPublic)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert ephemeral public key to X25519: %w", err)
-	}
-	result = append(result, ephemeralX25519PubBytes...)
-
-	// Append nonce
-	result = append(result, nonce...)
-
-	// Append ciphertext (includes authentication tag)
-	result = append(result, ciphertext...)
-
-	return result, nil
 }

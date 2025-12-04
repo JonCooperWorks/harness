@@ -4,17 +4,14 @@
 package keystore
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ed25519"
-	"crypto/hkdf"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"os"
 
 	"github.com/99designs/keyring"
+	"golang.org/x/crypto/curve25519"
 )
 
 func init() {
@@ -49,9 +46,9 @@ func NewKeychainKeystore() (Keystore, error) {
 	return &KeychainKeystore{ring: ring}, nil
 }
 
-// GetPrivateKey retrieves an Ed25519 private key from macOS Keychain
-func (k *KeychainKeystore) GetPrivateKey(keyID string) (ed25519.PrivateKey, error) {
-	item, err := k.ring.Get(keyID)
+// GetPrivateKey retrieves an Ed25519 private key from macOS Keychain (internal helper)
+func (k *KeychainKeystore) GetPrivateKey(keyID KeyID) (ed25519.PrivateKey, error) {
+	item, err := k.ring.Get(string(keyID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get key from keychain: %w", err)
 	}
@@ -80,7 +77,7 @@ func (k *KeychainKeystore) GetPrivateKey(keyID string) (ed25519.PrivateKey, erro
 }
 
 // SetPrivateKey stores an Ed25519 private key in macOS Keychain
-func (k *KeychainKeystore) SetPrivateKey(keyID string, privateKey ed25519.PrivateKey) error {
+func (k *KeychainKeystore) SetPrivateKey(id KeyID, privateKey ed25519.PrivateKey) error {
 	// Encode private key to PEM format (PKCS8)
 	privateKeyBytes, err := x509.MarshalPKCS8PrivateKey(privateKey)
 	if err != nil {
@@ -94,7 +91,7 @@ func (k *KeychainKeystore) SetPrivateKey(keyID string, privateKey ed25519.Privat
 
 	// Store in keychain
 	err = k.ring.Set(keyring.Item{
-		Key:  keyID,
+		Key:  string(id),
 		Data: privateKeyPEM,
 	})
 	if err != nil {
@@ -104,118 +101,75 @@ func (k *KeychainKeystore) SetPrivateKey(keyID string, privateKey ed25519.Privat
 	return nil
 }
 
-// GetPublicKey retrieves the public key associated with a key ID
-func (k *KeychainKeystore) GetPublicKey(keyID string) (ed25519.PublicKey, error) {
-	privateKey, err := k.GetPrivateKey(keyID)
+// PublicEd25519 returns the Ed25519 public key for keyID
+func (k *KeychainKeystore) PublicEd25519(id KeyID) (ed25519.PublicKey, error) {
+	privateKey, err := k.GetPrivateKey(id)
 	if err != nil {
 		return nil, err
 	}
 	return privateKey.Public().(ed25519.PublicKey), nil
 }
 
-// Sign signs the provided data hash using the private key associated with keyID
-func (k *KeychainKeystore) Sign(keyID string, hash []byte) ([]byte, error) {
-	privateKey, err := k.GetPrivateKey(keyID)
+// PublicX25519 returns the X25519 public key for keyID (32 bytes)
+func (k *KeychainKeystore) PublicX25519(id KeyID) ([32]byte, error) {
+	privateKey, err := k.GetPrivateKey(id)
+	if err != nil {
+		return [32]byte{}, err
+	}
+
+	// Convert Ed25519 private key to X25519
+	x25519PrivateKey, err := Ed25519ToX25519PrivateKey(privateKey)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("failed to convert private key to X25519: %w", err)
+	}
+
+	// Compute X25519 public key from private key
+	// X25519 public key = X25519(private_key, base_point)
+	var x25519Pub [32]byte
+	curve25519.ScalarBaseMult(&x25519Pub, (*[32]byte)(x25519PrivateKey))
+
+	return x25519Pub, nil
+}
+
+// SignDigest signs a canonical digest with the Ed25519 private key for keyID
+func (k *KeychainKeystore) SignDigest(id KeyID, digest []byte) ([]byte, error) {
+	privateKey, err := k.GetPrivateKey(id)
 	if err != nil {
 		return nil, err
 	}
 
 	// Ed25519.Sign returns a 64-byte signature
-	signature := ed25519.Sign(privateKey, hash)
+	signature := ed25519.Sign(privateKey, digest)
 	return signature, nil
 }
 
-// DecryptWithContext decrypts data encrypted via X25519 with a specific HKDF context
-func (k *KeychainKeystore) DecryptWithContext(keyID string, encryptedKey []byte, context string) ([]byte, error) {
-	if len(encryptedKey) < 32 {
-		return nil, fmt.Errorf("encrypted key too short")
-	}
-
-	privateKey, err := k.GetPrivateKey(keyID)
+// ECDH computes X25519(shared = sk(id) ⊗ peerPublic)
+func (k *KeychainKeystore) ECDH(id KeyID, peerPublic [32]byte) (sharedSecret [32]byte, err error) {
+	privateKey, err := k.GetPrivateKey(id)
 	if err != nil {
-		return nil, err
+		return [32]byte{}, err
 	}
-
-	// Extract ephemeral X25519 public key (32 bytes)
-	ephemeralX25519PubKey := encryptedKey[:32]
 
 	// Convert Ed25519 private key to X25519
 	x25519PrivateKey, err := Ed25519ToX25519PrivateKey(privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert private key to X25519: %w", err)
+		return [32]byte{}, fmt.Errorf("failed to convert private key to X25519: %w", err)
 	}
 
 	// Compute shared secret using X25519
-	sharedSecret, err := x25519SharedSecret(x25519PrivateKey, ephemeralX25519PubKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute shared secret: %w", err)
-	}
-
-	// Derive AES key from shared secret using HKDF with specified context
-	aesKey, err := deriveKey(sharedSecret, context)
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive key: %w", err)
-	}
-
-	// Decrypt the data
-	encryptedData := encryptedKey[32:]
-	if len(encryptedData) < 12+16 {
-		return nil, fmt.Errorf("encrypted data too short")
-	}
-
-	// Extract nonce (first 12 bytes)
-	nonce := encryptedData[:12]
-	ciphertext := encryptedData[12:]
-
-	block, err := aes.NewCipher(aesKey[:])
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cipher: %w", err)
-	}
-
-	// Create GCM mode
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %w", err)
-	}
-
-	// Decrypt and verify authentication tag
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt: %w", err)
-	}
-
-	return plaintext, nil
-}
-
-// padSharedSecret pads a shared secret to exactly 32 bytes for consistent key derivation
-func padSharedSecret(secret []byte) []byte {
-	const keySize = 32
-	if len(secret) >= keySize {
-		return secret[len(secret)-keySize:]
-	}
-	padded := make([]byte, keySize)
-	copy(padded[keySize-len(secret):], secret)
-	return padded
-}
-
-// deriveKey derives a 32-byte AES key using HKDF-SHA256
-func deriveKey(sharedSecret []byte, context string) ([32]byte, error) {
-	paddedSecret := padSharedSecret(sharedSecret)
-	keyBytes, err := hkdf.Key(sha256.New, paddedSecret, nil, context, 32)
-	if err != nil {
-		var key [32]byte
-		return key, fmt.Errorf("failed to derive key: %w", err)
-	}
-	var key [32]byte
-	copy(key[:], keyBytes)
-	return key, nil
+	curve25519.ScalarMult(&sharedSecret, (*[32]byte)(x25519PrivateKey), &peerPublic)
+	return sharedSecret, nil
 }
 
 // ListKeys returns all key IDs stored in macOS Keychain
-func (k *KeychainKeystore) ListKeys() ([]string, error) {
+func (k *KeychainKeystore) ListKeys() ([]KeyID, error) {
 	keys, err := k.ring.Keys()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list keys from keychain: %w", err)
 	}
-	return keys, nil
+	result := make([]KeyID, len(keys))
+	for i, key := range keys {
+		result[i] = KeyID(key)
+	}
+	return result, nil
 }
