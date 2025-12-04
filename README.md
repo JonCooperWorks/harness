@@ -120,9 +120,9 @@ HKDF contexts are managed internally:
 
 **Platform Implementations:**
 
-- **macOS**: Keychain Access (extensible to Secure Enclave)
-- **Linux**: libsecret/keyring (extensible to TPM/cloud KMS)
-- **Windows**: Credential Manager (extensible to TPM/Windows Key Storage Provider)
+- **macOS**: Keychain Access
+- **Linux**: libsecret/keyring
+- **Windows**: Credential Manager
 
 ### Adding New Keystore Implementations
 
