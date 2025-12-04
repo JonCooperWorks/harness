@@ -54,7 +54,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := ks.SetPrivateKey(*keystoreKeyID, privateKey); err != nil {
+	if err := ks.SetPrivateKey(keystore.KeyID(*keystoreKeyID), privateKey); err != nil {
 		logger.Error("failed to store key in keystore", "error", err, "key_id", *keystoreKeyID)
 		os.Exit(1)
 	}

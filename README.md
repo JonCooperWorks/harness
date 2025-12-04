@@ -80,21 +80,43 @@ Harness → Verifies signatures & expiration, decrypts, executes in WASM sandbox
 Go interface ([`crypto/keystore/Keystore`](crypto/keystore/interface.go)) provides cryptographic operations without exposing private keys, allowing hardware-backed or cloud-based key storage:
 
 ```go
+type KeyID string
+
 type Keystore interface {
-	GetPublicKey(keyID string) (ed25519.PublicKey, error)
-	Sign(keyID string, hash []byte) ([]byte, error)
-	DecryptWithContext(keyID string, encryptedKey []byte, context string) ([]byte, error)
-	SetPrivateKey(keyID string, privateKey ed25519.PrivateKey) error
-	ListKeys() ([]string, error)
+	PublicEd25519(id KeyID) (ed25519.PublicKey, error)
+	PublicX25519(id KeyID) ([32]byte, error)
+	SignDigest(id KeyID, digest []byte) ([]byte, error)
+	ECDH(id KeyID, peerPublic [32]byte) (sharedSecret [32]byte, err error)
+	SetPrivateKey(id KeyID, privateKey ed25519.PrivateKey) error
+	ListKeys() ([]KeyID, error)
 }
 ```
 
-**Sign**: Returns raw Ed25519 signature (64 bytes).
+**KeyID**: Selects which local key in this keystore to use. It does NOT change algorithms – just which Ed25519/X25519 pair. Supports multiple keys per process (dev/prod, low/high risk, rotation).
 
-**DecryptWithContext**: Decrypts X25519-encrypted data with HKDF context:
+**PublicEd25519**: Returns the Ed25519 public key for keyID.
 
-- `"harness-symmetric-key-v1"` for symmetric keys
-- `"harness-args-v1"` for execution arguments
+**PublicX25519**: Returns the X25519 public key for keyID (32 bytes).
+
+**SignDigest**: Signs a canonical digest with the Ed25519 private key for keyID. Returns raw Ed25519 signature (64 bytes). In HCEEP this is used for:
+- EO: H_payload
+- Target: H_target
+
+**ECDH**: Computes X25519(shared = sk(id) ⊗ peerPublic). In HCEEP this is used for:
+- Target: decrypt outer envelope E
+- Harness: unwrap Enc_K_sym and Enc_args
+
+Callers then run HKDF + AES-GCM using this shared secret.
+
+**EnvelopeCipher**: HCEEP-specific encryption/decryption is handled by the [`crypto/hceepcrypto`](crypto/hceepcrypto/envelope.go) package, which uses the keystore's ECDH method internally. The EnvelopeCipher interface provides:
+
+- `EncryptToPeer(peerPubX [32]byte, ctx Context, plaintext []byte) ([]byte, error)`
+- `DecryptFromPeer(ctx Context, blob []byte) ([]byte, error)`
+
+HKDF contexts are managed internally:
+- `ContextSymmetricKey` for symmetric keys
+- `ContextArgs` for execution arguments
+- `ContextEnvelope` for envelopes (onion encryption)
 
 **Platform Implementations:**
 
@@ -107,6 +129,8 @@ type Keystore interface {
 Harness uses a **registry pattern** for keystore implementations. To add a new keystore:
 
 1. **Implement the `Keystore` interface** (e.g., `crypto/keystore/cloudkms.go`)
+   - Implement `PublicEd25519`, `PublicX25519`, `SignDigest`, and `ECDH` methods
+   - Private keys never leave secure storage - all operations happen through the keystore interface
 2. **Register in `init()`**: `RegisterKeystore("cloudkms", NewCloudKMSKeystore)`
 3. **Use automatically**: `NewKeystore()` looks up registered factories by platform
 
@@ -117,6 +141,14 @@ Harness uses a **registry pattern** for keystore implementations. To add a new k
 - `ListRegisteredPlatforms() []string`
 
 Registry is thread-safe; implementations auto-register when imported.
+
+**Crypto Suite**: The keystore interface uses a fixed crypto suite (hard-coded, no algorithm agility):
+- Ed25519 for signatures
+- X25519 for key exchange
+- HKDF-SHA256 for key derivation
+- AES-256-GCM for authenticated encryption
+
+This design allows keys to remain in secure storage (HSMs, cloud KMS, Secure Enclave, TPM) and never be loaded into host memory. Implementations can swap in hardware-backed or cloud-based key storage transparently.
 
 ## Features
 

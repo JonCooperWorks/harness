@@ -97,7 +97,7 @@ func main() {
 	// For WASM plugins, resources are managed by the plugin loader
 
 	// Get exploit owner public key for logging
-	exploitPubKey, err := ks.GetPublicKey(*exploitKeystoreKey)
+	exploitPubKey, err := ks.PublicEd25519(keystore.KeyID(*exploitKeystoreKey))
 	if err != nil {
 		logger.Error("failed to get exploit owner public key", "error", err, "key_id", *exploitKeystoreKey)
 		os.Exit(1)
@@ -111,7 +111,7 @@ func main() {
 		HarnessPubKey:     harnessPubKey,
 		TargetPubKey:      targetPubKey,
 		PrincipalKeystore: ks,
-		PrincipalKeyID:    *exploitKeystoreKey,
+		PrincipalKeyID:    keystore.KeyID(*exploitKeystoreKey),
 	}
 
 	result, err := crypto.EncryptPlugin(encryptReq)

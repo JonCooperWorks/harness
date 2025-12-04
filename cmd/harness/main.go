@@ -71,14 +71,14 @@ func main() {
 		logger.Error("failed to create keystore", "error", err)
 		os.Exit(1)
 	}
-	harnessPubKey, err := ks.GetPublicKey(*harnessKeystoreKey)
+	harnessPubKey, err := ks.PublicEd25519(keystore.KeyID(*harnessKeystoreKey))
 	if err != nil {
 		logger.Error("failed to get harness public key", "error", err, "key_id", *harnessKeystoreKey)
 		os.Exit(1)
 	}
 
 	// Create PresidentialOrder from keystore
-	po, err := crypto.NewPresidentialOrderFromKeystoreWithPrincipal(*harnessKeystoreKey, targetPubKey, exploitPubKey)
+	po, err := crypto.NewPresidentialOrderFromKeystoreWithPrincipal(keystore.KeyID(*harnessKeystoreKey), targetPubKey, exploitPubKey)
 	if err != nil {
 		logger.Error("failed to create PresidentialOrder from keystore", "error", err)
 		os.Exit(1)

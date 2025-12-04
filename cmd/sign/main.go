@@ -98,7 +98,7 @@ func main() {
 		EncryptedData:   encryptedFileHandle,
 		ArgsJSON:        []byte(*argsJSON),
 		ClientKeystore:  ks,
-		ClientKeyID:     *targetKeystoreKey,
+		ClientKeyID:     keystore.KeyID(*targetKeystoreKey),
 		PrincipalPubKey: exploitPubKey,
 		PentesterPubKey: harnessPubKey,
 		Expiration:      &expirationTime,
@@ -146,7 +146,7 @@ func main() {
 	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
 
 	// Get target public key for logging
-	targetPubKey, err := ks.GetPublicKey(*targetKeystoreKey)
+	targetPubKey, err := ks.PublicEd25519(keystore.KeyID(*targetKeystoreKey))
 	if err != nil {
 		logger.Error("failed to get target public key", "error", err, "key_id", *targetKeystoreKey)
 		os.Exit(1)

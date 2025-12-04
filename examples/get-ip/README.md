@@ -10,24 +10,33 @@ cargo build --target wasm32-wasip1 --release
 
 The compiled WASM will be at: `target/wasm32-wasip1/release/get_ip_plugin.wasm`
 
-## Signing and Running
+## Encrypting, Signing, and Running
 
 ```bash
-# Sign the plugin using keystore
-./bin/sign \
+# First, encrypt the plugin (Exploit Owner)
+./bin/encrypt \
   -plugin examples/get-ip/target/wasm32-wasip1/release/get_ip_plugin.wasm \
   -type wasm \
-  -name get-ip-plugin \
-  -president-keystore-key "president-key" \
   -harness-key harness_public.pem \
+  -target-key target_public.pem \
+  -exploit-keystore-key "exploit-key" \
   -output get-ip-plugin.encrypted
 
-# Run the plugin using keystore
-./bin/harness \
+# Then, sign with execution arguments (Target)
+./bin/sign \
   -file get-ip-plugin.encrypted \
-  -keystore-key "harness-key" \
-  -president-key president_public.pem \
-  -args '{}'
+  -target-keystore-key "target-key" \
+  -exploit-key exploit_public.pem \
+  -harness-key harness_public.pem \
+  -args '{}' \
+  -output get-ip-plugin.approved
+
+# Finally, execute the plugin (Harness)
+./bin/harness \
+  -file get-ip-plugin.approved \
+  -harness-keystore-key "harness-key" \
+  -target-key target_public.pem \
+  -exploit-key exploit_public.pem
 ```
 
 ## Features
