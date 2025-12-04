@@ -52,58 +52,9 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** ar
 |----------------------|--------------------------------------------------------------|
 | Payload (P)          | The exploit binary (e.g., WASM).                             |
 | Inner Envelope       | Encrypted payload plus EO signature (not encrypted to target).|
-| (E_inner)            |                                                              |
 | Envelope (E)         | Inner envelope encrypted to target's public key (onion encryption).|
 | Approved Package (A) | Decrypted inner envelope plus Target signature, expiration, and encrypted args.|
 
-### 1.3. Assets
-
-HCEEP defines three distinct asset types that exist at different stages of the protocol lifecycle:
-
-#### 1.3.1. Cleartext Payload (P)
-
-The cleartext payload is the original, unencrypted exploit binary. This asset:
-
-- Contains the executable exploit code (e.g., WASM module, compiled binary)
-- Exists only transiently during encryption and execution phases
-- **MUST** be encrypted before storage or transport
-- **MUST** be wiped from memory immediately after use in execution enclaves
-- **SHOULD NEVER** be written to disk in cleartext form outside of hardened enclaves
-
-#### 1.3.2. Envelope (E) — Encrypted but Untargeted Payload
-
-The envelope is the encrypted payload with Exploit Owner signature, further encrypted to the target's public key (onion encryption). This asset:
-
-- Contains the payload encrypted with AES-256-GCM using a symmetric key wrapped for Harness (X25519)
-- Includes Exploit Owner signature (`sig_EO`) over the encrypted payload hash
-- Is encrypted to the target's public key (X25519 + AES-256-GCM) — only the target can decrypt E
-- Can be stored in stockpiles or repositories for later use
-- Is target-specific — each envelope is encrypted to a specific target's public key
-- Cannot be decrypted without target private key (`sk_T`)
-- Cannot be executed without target approval (missing `sig_T`, expiration, and encrypted args)
-- Provides payload confidentiality, EO authorization proof, and target-specific access control
-- Reduces risk: E + `sk_H` alone is insufficient — attacker also requires `sk_T` to decrypt and execute
-
-#### 1.3.3. Approved Package (A) — Targeted, Encrypted Payload Ready for Execution
-
-The approved package is the complete, execution-ready asset containing all required authorizations. This asset:
-
-- Contains the full envelope (E) plus target signature (`sig_T`)
-- Includes signed expiration timestamp and encrypted execution arguments
-- Is time-bounded — execution **MUST** be denied after expiration
-- Is target-specific — arguments and expiration are cryptographically bound to the payload
-- Requires Harness private key (`sk_H`) for decryption and execution
-- Provides complete dual-authorization (EO + Target) and execution readiness
-
-#### Asset Lifecycle
-
-```
-P → E_inner → E → A
-```
-
-Cleartext payload is encrypted to produce inner envelope (`E_inner`). Inner envelope is encrypted to target's public key to produce encrypted envelope (E). Target decrypts E to `E_inner`, verifies Exploit Owner signature (ensures chain-of-custody), then signs to produce approved package (A). Approved package is decrypted and executed by Harness.
-
----
 
 ## 2. Goals
 
