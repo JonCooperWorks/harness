@@ -321,6 +321,7 @@ Extism PDK provides input/output handling, HTTP client, and WASI support (file I
 |---------|-------------|
 | [`examples/get-ip/`](examples/get-ip/) | Fetches IP information from ipconfig.io using HTTP requests |
 | [`examples/hello-world/`](examples/hello-world/) | Simple hello world plugin demonstrating basic plugin structure |
+| [`examples/cve-2025-55182/`](examples/cve-2025-55182/) | Exploits CVE-2025-55182, a Next.js and React.js vulnerability involving prototype pollution and command injection |
 
 Each includes complete Rust source, `Cargo.toml`, build instructions, and usage examples.
 
