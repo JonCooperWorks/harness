@@ -67,7 +67,7 @@ HCEEP provides:
 - Stateless operation
 - Pluggable keystore interfaces
 - Pluggable plugin loaders
-- Optional paranoid mode eliminating key exposure
+- Optional paranoid mode eliminating key exposure, with split architecture where approved package **A** and `sk_H` are separated: `sk_H` is held by a remote ephemeral service provided by EO, accessible only to the pentester, and the service is useless without **A**
 
 ---
 
@@ -372,12 +372,14 @@ This section defines a maximal-security configuration where:
 - Target never handles ciphertext.
 - Only remote Harness compute enclaves see transient plaintext.
 - The pentester interacts only with an RPC/Lambda interface.
+- In paranoid mode, the approved package **A** and `sk_H` are split: `sk_H` is held by a remote ephemeral service provided by EO, accessible only to the pentester.
 
 ### 10.1. Actors and HSM Boundaries
 
 - EO-HSM holds `sk_EO`.
 - Target-HSM/KMS holds `sk_T`.
-- Harness-HSM holds `sk_H`.
+- Harness-HSM holds `sk_H` (in standard mode).
+- Remote Ephemeral Service (provided by EO) holds `sk_H` (in paranoid mode).
 - Build Enclave handles plaintext only transiently.
 - Execution Enclave handles plaintext only transiently.
 
@@ -409,6 +411,7 @@ This section defines a maximal-security configuration where:
 
 ### 10.4. Phase 2 — Execution (Remote)
 
+**Standard Mode:**
 1. Pentester triggers execution via RPC.
 2. Harness Execution Enclave fetches **A**.
 3. Verifies both signatures.
@@ -421,7 +424,27 @@ This section defines a maximal-security configuration where:
 7. Wipes plaintext from memory.
 8. Returns structured results.
 
-*Pentester never interacts with ciphertext or plaintext.*
+**Paranoid Mode:**
+1. Pentester sends approved package **A** to remote ephemeral service (provided by EO).
+2. Remote ephemeral service verifies both signatures (`sig_EO` and `sig_T`).
+3. Remote ephemeral service checks expiration (`now ≤ exp`).
+4. Remote ephemeral service uses `sk_H` to decrypt:  
+   - `Enc_K_sym` → `K_sym`  
+   - `Enc_P` → **P**  
+   - `Enc_args` → `args`
+5. Remote ephemeral service loads **P** into sandbox (no disk write).
+6. Remote ephemeral service executes exploit.
+7. Remote ephemeral service wipes plaintext from memory.
+8. Remote ephemeral service returns structured results to pentester.
+
+**Security Properties of Paranoid Mode:**
+- The remote ephemeral service is useless without **A** — it can only decrypt and run approved packages.
+- `sk_H` never leaves the remote ephemeral service.
+- Pentester never has access to `sk_H` or plaintext payloads.
+- The service can only be used by the pentester (access-controlled by EO).
+- **A** and `sk_H` are cryptographically split: execution requires both.
+
+*Pentester never interacts with ciphertext or plaintext, and never has access to `sk_H`.*
 
 ---
 
@@ -501,6 +524,7 @@ HCEEP is a dual-authorization, onion-encrypted, stateless, auditable execution e
 - Offers explicit key-based delegation
 - Provides perfect chain-of-custody
 - Supports HSM-only paranoid deployments
+- Supports paranoid mode where approved package **A** and `sk_H` are split: `sk_H` is held by a remote ephemeral service provided by EO, accessible only to the pentester, and the service is useless without **A** (can only decrypt and run approved packages)
 - Allows arbitrary payload formats via loaders
 - Avoids key leakage entirely
 
