@@ -1,11 +1,14 @@
 package keystore
 
 import (
+	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"crypto/sha512"
-
-	"filippo.io/edwards25519"
-	"golang.org/x/crypto/curve25519"
+	"errors"
+	"fmt"
+	"math/big"
 )
 
 // Ed25519ToX25519PrivateKey converts an Ed25519 private key to an X25519 private key.
@@ -32,34 +35,155 @@ func Ed25519ToX25519PrivateKey(ed25519PrivateKey ed25519.PrivateKey) ([]byte, er
 
 // Ed25519ToX25519PublicKey converts an Ed25519 public key to an X25519 public key.
 // This uses the standard conversion from Ed25519 (Edwards curve) to X25519 (Montgomery curve).
+// Conversion formula: u = (1 + y) / (1 - y) mod p where p = 2^255 - 19
+// This implementation uses only standard library functions.
 func Ed25519ToX25519PublicKey(ed25519PublicKey ed25519.PublicKey) ([]byte, error) {
 	if len(ed25519PublicKey) != ed25519.PublicKeySize {
 		return nil, ErrInvalidKeySize
 	}
 
-	// Convert Ed25519 public key (Edwards curve point) to X25519 public key (Montgomery curve)
-	// Using BytesMontgomery() which directly converts to Montgomery format
-	var edwardsPoint edwards25519.Point
-	if _, err := edwardsPoint.SetBytes(ed25519PublicKey); err != nil {
-		return nil, err
+	// Ed25519 public key is the y-coordinate (little-endian, 32 bytes) with a sign bit for x
+	// Extract y coordinate from the public key bytes
+	y := new(big.Int).SetBytes(reverseBytes(ed25519PublicKey)) // Convert from little-endian
+
+	// Curve25519 prime: p = 2^255 - 19
+	p := new(big.Int)
+	p.Exp(big.NewInt(2), big.NewInt(255), nil)
+	p.Sub(p, big.NewInt(19))
+
+	// Calculate u = (1 + y) / (1 - y) mod p
+	// First compute (1 + y) mod p
+	onePlusY := new(big.Int).Add(big.NewInt(1), y)
+	onePlusY.Mod(onePlusY, p)
+
+	// Compute (1 - y) mod p
+	oneMinusY := new(big.Int).Sub(big.NewInt(1), y)
+	oneMinusY.Mod(oneMinusY, p)
+
+	// Handle edge case: if (1 - y) is 0, this would be division by zero
+	// In practice, this should never happen for valid Ed25519 public keys
+	if oneMinusY.Sign() == 0 {
+		return nil, errors.New("invalid Ed25519 public key: would result in division by zero")
 	}
 
-	// BytesMontgomery() returns the Montgomery u coordinate (32 bytes)
-	return edwardsPoint.BytesMontgomery(), nil
+	// Compute modular inverse of (1 - y) mod p
+	oneMinusYInv := new(big.Int).ModInverse(oneMinusY, p)
+	if oneMinusYInv == nil {
+		return nil, errors.New("failed to compute modular inverse")
+	}
+
+	// u = (1 + y) * inv(1 - y) mod p
+	u := new(big.Int).Mul(onePlusY, oneMinusYInv)
+	u.Mod(u, p)
+
+	// Convert u to 32-byte little-endian representation
+	result := make([]byte, 32)
+	uBytes := u.Bytes()
+	// Handle case where u is less than 32 bytes
+	if len(uBytes) > 32 {
+		return nil, errors.New("converted X25519 public key exceeds 32 bytes")
+	}
+	copy(result, uBytes)
+	reverseBytesInPlace(result) // Convert to little-endian
+
+	return result, nil
 }
 
-// x25519SharedSecret computes a shared secret using X25519 key exchange.
-func x25519SharedSecret(privateKey, publicKey []byte) ([]byte, error) {
-	if len(privateKey) != 32 {
-		return nil, ErrInvalidKeySize
+// reverseBytes reverses the byte order of a byte slice and returns a new slice.
+func reverseBytes(b []byte) []byte {
+	result := make([]byte, len(b))
+	for i := 0; i < len(b); i++ {
+		result[i] = b[len(b)-1-i]
 	}
-	if len(publicKey) != 32 {
-		return nil, ErrInvalidKeySize
+	return result
+}
+
+// reverseBytesInPlace reverses the byte order of a byte slice in place.
+func reverseBytesInPlace(b []byte) {
+	for i := 0; i < len(b)/2; i++ {
+		j := len(b) - 1 - i
+		b[i], b[j] = b[j], b[i]
+	}
+}
+
+// ScalarBaseMult computes the X25519 public key from a private key scalar.
+// This replaces the deprecated curve25519.ScalarBaseMult function.
+func ScalarBaseMult(privScalar []byte) ([32]byte, error) {
+	if len(privScalar) != 32 {
+		return [32]byte{}, ErrInvalidKeySize
 	}
 
-	var sharedSecret [32]byte
-	curve25519.ScalarMult(&sharedSecret, (*[32]byte)(privateKey), (*[32]byte)(publicKey))
-	return sharedSecret[:], nil
+	privKey, err := ecdh.X25519().NewPrivateKey(privScalar)
+	if err != nil {
+		return [32]byte{}, err
+	}
+
+	pubKey := privKey.PublicKey()
+	pubKeyBytes := pubKey.Bytes()
+	if len(pubKeyBytes) != 32 {
+		return [32]byte{}, errors.New("invalid public key size")
+	}
+
+	var result [32]byte
+	copy(result[:], pubKeyBytes)
+	return result, nil
+}
+
+// ScalarMult computes the X25519 shared secret using scalar multiplication.
+// This replaces the deprecated curve25519.ScalarMult function.
+func ScalarMult(privScalar []byte, peerPubKey [32]byte) ([32]byte, error) {
+	if len(privScalar) != 32 {
+		return [32]byte{}, ErrInvalidKeySize
+	}
+
+	privKey, err := ecdh.X25519().NewPrivateKey(privScalar)
+	if err != nil {
+		return [32]byte{}, err
+	}
+
+	peerKey, err := ecdh.X25519().NewPublicKey(peerPubKey[:])
+	if err != nil {
+		return [32]byte{}, err
+	}
+
+	sharedSecret, err := privKey.ECDH(peerKey)
+	if err != nil {
+		return [32]byte{}, err
+	}
+
+	if len(sharedSecret) != 32 {
+		return [32]byte{}, errors.New("invalid shared secret size")
+	}
+
+	var result [32]byte
+	copy(result[:], sharedSecret)
+	return result, nil
+}
+
+// DeriveKeyFromSecret derives a 32-byte AES key using HKDF-SHA256 with context.
+// This is a shared implementation used by all keystore backends.
+func DeriveKeyFromSecret(sharedSecret []byte, context Context) ([32]byte, error) {
+	paddedSecret := padSharedSecret(sharedSecret)
+	keyBytes, err := hkdf.Key(sha256.New, paddedSecret, nil, string(context), 32)
+	if err != nil {
+		var key [32]byte
+		return key, fmt.Errorf("failed to derive key: %w", err)
+	}
+	var key [32]byte
+	copy(key[:], keyBytes)
+	return key, nil
+}
+
+// padSharedSecret pads a shared secret to exactly 32 bytes for consistent key derivation.
+// This is a shared implementation used by all keystore backends.
+func padSharedSecret(secret []byte) []byte {
+	const keySize = 32
+	if len(secret) >= keySize {
+		return secret[len(secret)-keySize:]
+	}
+	padded := make([]byte, keySize)
+	copy(padded[keySize-len(secret):], secret)
+	return padded
 }
 
 var ErrInvalidKeySize = &keySizeError{}

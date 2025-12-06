@@ -3,10 +3,8 @@ module github.com/joncooperworks/harness
 go 1.24.4
 
 require (
-	filippo.io/edwards25519 v1.1.0
 	github.com/99designs/keyring v1.2.2
 	github.com/extism/go-sdk v1.7.1
-	golang.org/x/crypto v0.45.0
 )
 
 require (

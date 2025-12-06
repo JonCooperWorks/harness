@@ -7,7 +7,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ed25519"
-	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -16,7 +15,6 @@ import (
 	"fmt"
 
 	"github.com/99designs/keyring"
-	"golang.org/x/crypto/curve25519"
 )
 
 func init() {
@@ -159,8 +157,10 @@ func (k *keyringKeystore) PublicKeyX25519() ([32]byte, error) {
 	}
 
 	// Compute X25519 public key from private key
-	var x25519Pub [32]byte
-	curve25519.ScalarBaseMult(&x25519Pub, (*[32]byte)(x25519PrivateKey))
+	x25519Pub, err := ScalarBaseMult(x25519PrivateKey)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("failed to compute X25519 public key: %w", err)
+	}
 
 	return x25519Pub, nil
 }
@@ -215,11 +215,13 @@ func (k *keyringKeystore) EncryptFor(recipientPub [32]byte, plaintext []byte, co
 	}
 
 	// Compute shared secret using X25519
-	var sharedSecret [32]byte
-	curve25519.ScalarMult(&sharedSecret, (*[32]byte)(ephemeralX25519Private), &recipientPub)
+	sharedSecret, err := ScalarMult(ephemeralX25519Private, recipientPub)
+	if err != nil {
+		return nil, k.keyID, fmt.Errorf("failed to compute shared secret: %w", err)
+	}
 
 	// Derive AES key from shared secret using HKDF with context
-	aesKey, err := deriveKeyFromSecretLinux(sharedSecret[:], context)
+	aesKey, err := DeriveKeyFromSecret(sharedSecret[:], context)
 	if err != nil {
 		return nil, k.keyID, fmt.Errorf("failed to derive key: %w", err)
 	}
@@ -279,11 +281,13 @@ func (k *keyringKeystore) Decrypt(ciphertext []byte, context Context) ([]byte, K
 	}
 
 	// Compute shared secret using X25519
-	var sharedSecret [32]byte
-	curve25519.ScalarMult(&sharedSecret, (*[32]byte)(x25519PrivateKey), &ephemeralX25519PubKey)
+	sharedSecret, err := ScalarMult(x25519PrivateKey, ephemeralX25519PubKey)
+	if err != nil {
+		return nil, k.keyID, fmt.Errorf("failed to compute shared secret: %w", err)
+	}
 
 	// Derive AES key from shared secret using HKDF with context
-	aesKey, err := deriveKeyFromSecretLinux(sharedSecret[:], context)
+	aesKey, err := DeriveKeyFromSecret(sharedSecret[:], context)
 	if err != nil {
 		return nil, k.keyID, fmt.Errorf("failed to derive key: %w", err)
 	}
@@ -346,26 +350,3 @@ func (k *keyringKeystore) getPrivateKey() (ed25519.PrivateKey, error) {
 	return nil, fmt.Errorf("failed to parse private key: unsupported format")
 }
 
-// deriveKeyFromSecretLinux derives a 32-byte AES key using HKDF-SHA256 with context.
-func deriveKeyFromSecretLinux(sharedSecret []byte, context Context) ([32]byte, error) {
-	paddedSecret := padSharedSecretLinux(sharedSecret)
-	keyBytes, err := hkdf.Key(sha256.New, paddedSecret, nil, string(context), 32)
-	if err != nil {
-		var key [32]byte
-		return key, fmt.Errorf("failed to derive key: %w", err)
-	}
-	var key [32]byte
-	copy(key[:], keyBytes)
-	return key, nil
-}
-
-// padSharedSecretLinux pads a shared secret to exactly 32 bytes for consistent key derivation.
-func padSharedSecretLinux(secret []byte) []byte {
-	const keySize = 32
-	if len(secret) >= keySize {
-		return secret[len(secret)-keySize:]
-	}
-	padded := make([]byte, keySize)
-	copy(padded[keySize-len(secret):], secret)
-	return padded
-}
