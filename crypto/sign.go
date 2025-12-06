@@ -2,7 +2,6 @@ package crypto
 
 import (
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -28,14 +27,12 @@ type SignEncryptedPluginRequest struct {
 	// These arguments are encrypted with the pentester's public key before signing,
 	// ensuring only the pentester can read them.
 	ArgsJSON []byte
-	// ClientKeystore is the keystore containing the client's (target's) private key.
-	// The client's key is used to:
+	// ClientKeystore is a Keystore bound to the client's (target's) key.
+	// The keystore is used to:
 	//   - Decrypt the envelope (E) to get the inner envelope (E_inner)
 	//   - Sign the encrypted payload hash, expiration, and arguments
+	// Use keystore.NewKeystoreForKey(keyID) to create a bound keystore.
 	ClientKeystore keystore.Keystore
-	// ClientKeyID is the key ID in the keystore for the client's (target's) private key.
-	// This key is used to decrypt the envelope and sign the approval of execution arguments and expiration.
-	ClientKeyID keystore.KeyID
 	// PrincipalPubKey is the exploit owner's (principal's) public key for verifying the payload signature.
 	// The exploit owner signature is verified before the target signs, ensuring cryptographic chain-of-custody.
 	PrincipalPubKey ed25519.PublicKey
@@ -66,10 +63,10 @@ type SignEncryptedPluginResult struct {
 // This function implements the client's role in the dual-authorization model:
 //  1. Reads the encrypted envelope (E) from EncryptPlugin
 //  2. Decrypts the envelope using the target's private key to get the inner envelope (E_inner)
-//  3. Verifies the exploit owner (principal) signature on the encrypted payload hash (ensures chain-of-custody)
+//  3. Verifies the exploit owner (principal) signature on the encrypted payload using ContextPayloadSignature (ensures chain-of-custody)
 //  4. Encrypts execution arguments with the pentester's public key (ECDH + AES-256-GCM)
 //  5. Calculates expiration timestamp (defaults to 72 hours if not provided)
-//  6. Signs the encrypted payload hash, expiration, and encrypted arguments with the client's private key
+//  6. Signs the encrypted payload, expiration, and encrypted arguments with the client's private key using ContextClientSignature
 //  7. Appends the signature, expiration, and encrypted arguments to create an approved package
 //
 // The function works with io.Reader, making it suitable for Lambda/S3 use cases where
@@ -89,9 +86,6 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	if req.ClientKeystore == nil {
 		return nil, errors.New("client keystore cannot be nil")
 	}
-	if req.ClientKeyID == "" {
-		return nil, errors.New("client key ID cannot be empty")
-	}
 	if req.PrincipalPubKey == nil {
 		return nil, errors.New("principal public key cannot be nil")
 	}
@@ -99,8 +93,8 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 		return nil, errors.New("pentester public key cannot be nil")
 	}
 
-	// Create EnvelopeCipher for target
-	enc := hceepcrypto.NewEnvelopeCipher(req.ClientKeystore, req.ClientKeyID)
+	// Create EnvelopeCipher for target using the bound keystore
+	enc := hceepcrypto.NewEnvelopeCipher(req.ClientKeystore)
 
 	// Convert pentester public key to X25519
 	pentesterPubX, err := keystore.Ed25519ToX25519PublicKey(req.PentesterPubKey)
@@ -171,28 +165,25 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 		return nil, errors.New("encrypted data too short for principal signature")
 	}
 	principalSignature := encryptedData[headerSize+4 : headerSize+4+principalSigLen]
-	
+
 	// Extract encrypted payload for hashing and verification
 	// Encrypted payload = [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 	encryptedPayload := encryptedData[headerSize+4+principalSigLen:]
 
-	// Hash the encrypted payload for signature verification
-	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
-
 	// Verify principal (exploit owner) signature BEFORE signing (ensures chain-of-custody)
-	if !ed25519.Verify(req.PrincipalPubKey, encryptedPayloadHash[:], principalSignature) {
+	// EO signatures use ContextPayloadSignature for domain separation
+	if err := req.ClientKeystore.Verify(req.PrincipalPubKey, encryptedPayload, principalSignature, hceepcrypto.ContextPayloadSignature); err != nil {
 		return nil, errors.New("principal signature verification failed: payload not signed by expected exploit owner")
 	}
 
-	// Sign encrypted payload hash + expiration + encrypted arguments together using keystore
-	// Create data to sign: encrypted_payload_hash (32 bytes) + expiration (8 bytes) + encrypted_args
-	dataToSign := make([]byte, 32+8+len(encryptedArgs))
-	copy(dataToSign[0:32], encryptedPayloadHash[:])
-	binary.BigEndian.PutUint64(dataToSign[32:40], uint64(expirationUnix))
-	copy(dataToSign[40:], encryptedArgs)
+	// Build data to sign: encrypted_payload + expiration (8 bytes) + encrypted_args
+	// Client signature uses ContextClientSignature for domain separation
+	dataToSign := make([]byte, len(encryptedPayload)+8+len(encryptedArgs))
+	copy(dataToSign[0:len(encryptedPayload)], encryptedPayload)
+	binary.BigEndian.PutUint64(dataToSign[len(encryptedPayload):len(encryptedPayload)+8], uint64(expirationUnix))
+	copy(dataToSign[len(encryptedPayload)+8:], encryptedArgs)
 
-	hash := sha256.Sum256(dataToSign)
-	signature, err := req.ClientKeystore.SignDigest(req.ClientKeyID, hash[:])
+	signature, err := req.ClientKeystore.Sign(dataToSign, hceepcrypto.ContextClientSignature)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign payload and arguments: %w", err)
 	}

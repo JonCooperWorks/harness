@@ -5,11 +5,11 @@ import (
 	"sync"
 )
 
-// KeystoreFactory is a function that creates a new Keystore instance.
+// KeystoreFactory is a function that creates a new KeyManager instance.
 //
 // Factory functions are registered with RegisterKeystore and are called when
 // a keystore for that platform is needed.
-type KeystoreFactory func() (Keystore, error)
+type KeystoreFactory func() (KeyManager, error)
 
 var (
 	// registry stores keystore factories by platform identifier

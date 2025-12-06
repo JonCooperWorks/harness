@@ -4,7 +4,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -26,10 +25,10 @@ type DecryptedResult struct {
 	// These were encrypted with the pentester's public key and signed by the client.
 	Args []byte
 	// ClientSignature is the client's signature from the approved file.
-	// This signature covers the encrypted payload hash, expiration, and encrypted arguments.
+	// This signature covers the encrypted payload, expiration, and encrypted arguments.
 	ClientSignature []byte
 	// PrincipalSignature is the principal's signature from the approved file.
-	// This signature covers the encrypted payload hash.
+	// This signature covers the encrypted payload.
 	PrincipalSignature []byte
 }
 
@@ -60,25 +59,24 @@ type PresidentialOrder interface {
 type PresidentialOrderImpl struct {
 	clientPubKey    ed25519.PublicKey // Client's public key (for verifying argument signature)
 	principalPubKey ed25519.PublicKey // Principal's public key (for verifying payload signature)
-	keystore        keystore.Keystore
-	keystoreKeyID   keystore.KeyID
+	keystore        keystore.Keystore // Bound keystore for the harness/pentester key
 }
 
-// NewPresidentialOrderFromKeystoreWithPrincipal creates a new PresidentialOrder with principal public key.
+// NewPresidentialOrderFromKeystore creates a new PresidentialOrder with the specified keystore and public keys.
 //
-// This is the recommended way to create a PresidentialOrder. It uses a private key
-// stored in the OS keystore (never loaded into memory) and includes both client and
+// This is the recommended way to create a PresidentialOrder. It uses a bound Keystore
+// (private key stored in OS keystore, never loaded into memory) and includes both client and
 // principal signature verification for full dual-authorization security.
 //
-// The keystoreKeyID identifies the pentester's private key in the OS keystore.
+// The harnessKeystore is a bound keystore for the pentester's key (use keystore.NewKeystoreForKey).
 // The clientPubKey is the client's public key for verifying argument signatures.
-// The principalPubKey is the principal's public key for verifying payload signatures.
+// The principalPubKey is the principal's (EO's) public key for verifying payload signatures.
 //
 // The private key never leaves secure storage - all decryption operations happen
 // through the keystore interface, allowing hardware-backed or cloud-based key storage.
-func NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID keystore.KeyID, clientPubKey ed25519.PublicKey, principalPubKey ed25519.PublicKey) (PresidentialOrder, error) {
-	if keystoreKeyID == "" {
-		return nil, errors.New("keystore key ID cannot be empty")
+func NewPresidentialOrderFromKeystore(harnessKeystore keystore.Keystore, clientPubKey ed25519.PublicKey, principalPubKey ed25519.PublicKey) (PresidentialOrder, error) {
+	if harnessKeystore == nil {
+		return nil, errors.New("harness keystore cannot be nil")
 	}
 	if len(clientPubKey) == 0 {
 		return nil, errors.New("client public key cannot be empty")
@@ -87,26 +85,18 @@ func NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID keystore.KeyID,
 		return nil, errors.New("principal public key cannot be empty")
 	}
 
-	ks, err := keystore.NewKeystore()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create keystore: %w", err)
-	}
-
-	// Don't extract private key - use keystore operations directly
-	// This allows keys to remain in secure storage (HSM, cloud KMS, Secure Enclave, TPM)
 	return &PresidentialOrderImpl{
 		clientPubKey:    clientPubKey,
 		principalPubKey: principalPubKey,
-		keystore:        ks,
-		keystoreKeyID:   keystoreKeyID,
+		keystore:        harnessKeystore,
 	}, nil
 }
 
 // VerifyAndDecrypt verifies signatures and decrypts the payload.
 //
 // This method implements the pentester's role in the dual-authorization model:
-//  1. Verifies the principal signature on the encrypted payload hash (before decryption)
-//  2. Verifies the client signature on encrypted payload hash + expiration + arguments
+//  1. Verifies the principal signature on the encrypted payload using ContextPayloadSignature (before decryption)
+//  2. Verifies the client signature on encrypted payload + expiration + arguments using ContextClientSignature
 //  3. Checks that the expiration has not passed
 //  4. Decrypts the symmetric key using ECDH with the pentester's private key (from keystore)
 //  5. Decrypts the plugin data using AES-256-GCM
@@ -114,9 +104,11 @@ func NewPresidentialOrderFromKeystoreWithPrincipal(keystoreKeyID keystore.KeyID,
 //
 // File format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
 //
-// Principal signature signs: SHA256([metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data])
+// Principal signature signs: encrypted_payload = [metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+// (using ContextPayloadSignature for domain separation)
 //
-// Client signature signs: SHA256(SHA256(encrypted_payload) || expiration || encrypted_args)
+// Client signature signs: encrypted_payload || expiration || encrypted_args
+// (using ContextClientSignature for domain separation)
 //
 // Returns an error if any verification fails, expiration has passed, or decryption fails.
 func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedResult, error) {
@@ -210,7 +202,7 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
 
-	// Calculate encrypted payload hash for principal signature verification
+	// Calculate encrypted payload for signature verification
 	// Encrypted payload = [metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 	encryptedPayloadStart := pos - 4 - metadataLen // Start at metadata_len
 	encryptedPayloadEnd := pos + metadataStruct.SymmetricKeyLen + metadataStruct.PluginDataLen
@@ -218,11 +210,11 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, errors.New("file too short for encrypted payload")
 	}
 	encryptedPayload := fileData[encryptedPayloadStart:encryptedPayloadEnd]
-	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
 
-	// Verify principal signature BEFORE decryption (signs encrypted payload hash)
-	if !ed25519.Verify(po.principalPubKey, encryptedPayloadHash[:], principalSignature) {
-		return nil, errors.New("principal signature verification failed (signature must cover encrypted payload hash)")
+	// Verify principal signature BEFORE decryption
+	// EO signatures use ContextPayloadSignature for domain separation
+	if err := po.keystore.Verify(po.principalPubKey, encryptedPayload, principalSignature, hceepcrypto.ContextPayloadSignature); err != nil {
+		return nil, errors.New("principal signature verification failed (signature must cover encrypted payload with ContextPayloadSignature)")
 	}
 
 	// Read encrypted symmetric key
@@ -288,20 +280,19 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, fmt.Errorf("file format error: expected %d bytes total, but file has %d bytes", pos, len(fileData))
 	}
 
-	// Verify client signature: Signature covers encrypted_payload_hash (32 bytes) + expiration (8 bytes) + encrypted_args
-	// Note: encryptedPayloadHash is computed from [metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
-	dataToVerify := make([]byte, 32+8+len(encryptedArgs))
-	copy(dataToVerify[0:32], encryptedPayloadHash[:])
-	binary.BigEndian.PutUint64(dataToVerify[32:40], uint64(expirationUnix))
-	copy(dataToVerify[40:], encryptedArgs)
+	// Verify client signature: Signature covers encrypted_payload + expiration (8 bytes) + encrypted_args
+	// Client signatures use ContextClientSignature for domain separation
+	dataToVerify := make([]byte, len(encryptedPayload)+8+len(encryptedArgs))
+	copy(dataToVerify[0:len(encryptedPayload)], encryptedPayload)
+	binary.BigEndian.PutUint64(dataToVerify[len(encryptedPayload):len(encryptedPayload)+8], uint64(expirationUnix))
+	copy(dataToVerify[len(encryptedPayload)+8:], encryptedArgs)
 
-	dataHash := sha256.Sum256(dataToVerify)
-	if !ed25519.Verify(po.clientPubKey, dataHash[:], clientSignature) {
-		return nil, errors.New("client signature verification failed (signature must cover encrypted payload hash, expiration, and arguments)")
+	if err := po.keystore.Verify(po.clientPubKey, dataToVerify, clientSignature, hceepcrypto.ContextClientSignature); err != nil {
+		return nil, errors.New("client signature verification failed (signature must cover encrypted payload, expiration, and arguments with ContextClientSignature)")
 	}
 
-	// Create EnvelopeCipher for harness
-	enc := hceepcrypto.NewEnvelopeCipher(po.keystore, po.keystoreKeyID)
+	// Create EnvelopeCipher for harness using the bound keystore
+	enc := hceepcrypto.NewEnvelopeCipher(po.keystore)
 
 	// Decrypt symmetric key using EnvelopeCipher
 	symmetricKey, err := enc.DecryptFromPeer(hceepcrypto.ContextSymmetricKey, encryptedSymmetricKey)

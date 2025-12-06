@@ -67,10 +67,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load keystore for exploit owner signature
-	ks, err := keystore.NewKeystore()
+	// Create bound keystore for exploit owner signature
+	// The keystore is bound to the specific key ID for cryptographic operations
+	exploitKs, err := keystore.NewKeystoreForKey(keystore.KeyID(*exploitKeystoreKey))
 	if err != nil {
-		logger.Error("failed to create keystore", "error", err)
+		logger.Error("failed to create keystore for exploit owner", "error", err, "key_id", *exploitKeystoreKey)
 		os.Exit(1)
 	}
 
@@ -97,7 +98,7 @@ func main() {
 	// For WASM plugins, resources are managed by the plugin loader
 
 	// Get exploit owner public key for logging
-	exploitPubKey, err := ks.PublicEd25519(keystore.KeyID(*exploitKeystoreKey))
+	exploitPubKey, err := exploitKs.PublicKey()
 	if err != nil {
 		logger.Error("failed to get exploit owner public key", "error", err, "key_id", *exploitKeystoreKey)
 		os.Exit(1)
@@ -110,8 +111,7 @@ func main() {
 		PluginName:        pluginName,
 		HarnessPubKey:     harnessPubKey,
 		TargetPubKey:      targetPubKey,
-		PrincipalKeystore: ks,
-		PrincipalKeyID:    keystore.KeyID(*exploitKeystoreKey),
+		PrincipalKeystore: exploitKs,
 	}
 
 	result, err := crypto.EncryptPlugin(encryptReq)

@@ -65,20 +65,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Get harness public key from keystore for logging
-	ks, err := keystore.NewKeystore()
+	// Create bound keystore for harness (pentester) key
+	// The keystore is bound to the specific key ID for cryptographic operations
+	harnessKs, err := keystore.NewKeystoreForKey(keystore.KeyID(*harnessKeystoreKey))
 	if err != nil {
-		logger.Error("failed to create keystore", "error", err)
+		logger.Error("failed to create keystore for harness", "error", err, "key_id", *harnessKeystoreKey)
 		os.Exit(1)
 	}
-	harnessPubKey, err := ks.PublicEd25519(keystore.KeyID(*harnessKeystoreKey))
+
+	// Get harness public key for logging
+	harnessPubKey, err := harnessKs.PublicKey()
 	if err != nil {
 		logger.Error("failed to get harness public key", "error", err, "key_id", *harnessKeystoreKey)
 		os.Exit(1)
 	}
 
-	// Create PresidentialOrder from keystore
-	po, err := crypto.NewPresidentialOrderFromKeystoreWithPrincipal(keystore.KeyID(*harnessKeystoreKey), targetPubKey, exploitPubKey)
+	// Create PresidentialOrder from bound keystore
+	po, err := crypto.NewPresidentialOrderFromKeystore(harnessKs, targetPubKey, exploitPubKey)
 	if err != nil {
 		logger.Error("failed to create PresidentialOrder from keystore", "error", err)
 		os.Exit(1)

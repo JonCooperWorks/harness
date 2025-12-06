@@ -61,10 +61,11 @@ func main() {
 		*outputPath = *encryptedFile + ".approved"
 	}
 
-	// Load keystore (keys never leave secure storage)
-	ks, err := keystore.NewKeystore()
+	// Create bound keystore for target's key (keys never leave secure storage)
+	// The keystore is bound to the specific key ID for cryptographic operations
+	targetKs, err := keystore.NewKeystoreForKey(keystore.KeyID(*targetKeystoreKey))
 	if err != nil {
-		logger.Error("failed to create keystore", "error", err)
+		logger.Error("failed to create keystore for target", "error", err, "key_id", *targetKeystoreKey)
 		os.Exit(1)
 	}
 
@@ -97,8 +98,7 @@ func main() {
 	signReq := &crypto.SignEncryptedPluginRequest{
 		EncryptedData:   encryptedFileHandle,
 		ArgsJSON:        []byte(*argsJSON),
-		ClientKeystore:  ks,
-		ClientKeyID:     keystore.KeyID(*targetKeystoreKey),
+		ClientKeystore:  targetKs,
 		PrincipalPubKey: exploitPubKey,
 		PentesterPubKey: harnessPubKey,
 		Expiration:      &expirationTime,
@@ -146,7 +146,7 @@ func main() {
 	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
 
 	// Get target public key for logging
-	targetPubKey, err := ks.PublicEd25519(keystore.KeyID(*targetKeystoreKey))
+	targetPubKey, err := targetKs.PublicKey()
 	if err != nil {
 		logger.Error("failed to get target public key", "error", err, "key_id", *targetKeystoreKey)
 		os.Exit(1)

@@ -5,7 +5,7 @@ package keystore
 
 import "fmt"
 
-// NewKeyringKeystore creates a new Linux keyring keystore (stub for non-Linux platforms)
-func NewKeyringKeystore() (Keystore, error) {
+// NewKeyringKeyManager creates a new Linux keyring key manager (stub for non-Linux platforms)
+func NewKeyringKeyManager() (KeyManager, error) {
 	return nil, fmt.Errorf("Linux keyring keystore is only available on Linux")
 }

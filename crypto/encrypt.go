@@ -8,7 +8,6 @@ import (
 	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -43,12 +42,10 @@ type EncryptPluginRequest struct {
 	// The inner envelope is encrypted to this key using X25519 key exchange.
 	// Only the target can decrypt the envelope before signing.
 	TargetPubKey ed25519.PublicKey
-	// PrincipalKeystore is the keystore containing the principal's private key.
-	// The principal's key is used to sign the encrypted payload hash.
+	// PrincipalKeystore is a Keystore bound to the principal's (exploit owner's) key.
+	// The keystore is used to sign the encrypted payload hash, proving EO approval.
+	// Use keystore.NewKeystoreForKey(keyID) to create a bound keystore.
 	PrincipalKeystore keystore.Keystore
-	// PrincipalKeyID is the key ID in the keystore for the principal's private key.
-	// This key is used to sign the encrypted payload to prove principal approval.
-	PrincipalKeyID keystore.KeyID
 }
 
 // EncryptPluginResult contains the encrypted plugin data and metadata.
@@ -78,7 +75,7 @@ type EncryptPluginResult struct {
 //  2. Generates a random AES-256 symmetric key
 //  3. Encrypts the plugin data with AES-256-GCM using the symmetric key
 //  4. Encrypts the symmetric key using ECDH key exchange with the pentester's public key
-//  5. Signs the encrypted payload hash with the principal's private key
+//  5. Signs the encrypted payload hash with the principal's private key (using EO signature context)
 //  6. Encrypts the inner envelope to the target's public key (onion encryption)
 //
 // The function works with io.Reader, making it suitable for Lambda/S3 use cases where
@@ -102,12 +99,9 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 	if req.PrincipalKeystore == nil {
 		return nil, errors.New("principal keystore cannot be nil")
 	}
-	if req.PrincipalKeyID == "" {
-		return nil, errors.New("principal key ID cannot be empty")
-	}
 
-	// Create EnvelopeCipher for exploit owner
-	enc := hceepcrypto.NewEnvelopeCipher(req.PrincipalKeystore, req.PrincipalKeyID)
+	// Create EnvelopeCipher for exploit owner using the bound keystore
+	enc := hceepcrypto.NewEnvelopeCipher(req.PrincipalKeystore)
 
 	// Convert harness public key to X25519
 	harnessPubX, err := keystore.Ed25519ToX25519PublicKey(req.HarnessPubKey)
@@ -186,9 +180,9 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 	encryptedPayload = append(encryptedPayload, encryptedSymmetricKey...)
 	encryptedPayload = append(encryptedPayload, encryptedPluginData...)
 
-	// Sign encrypted payload hash with principal key
-	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
-	principalSignature, err := req.PrincipalKeystore.SignDigest(req.PrincipalKeyID, encryptedPayloadHash[:])
+	// Sign encrypted payload with principal key using the EO signature context
+	// The context provides domain separation - EO signatures use ContextPayloadSignature
+	principalSignature, err := req.PrincipalKeystore.Sign(encryptedPayload, hceepcrypto.ContextPayloadSignature)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign encrypted payload: %w", err)
 	}

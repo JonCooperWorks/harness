@@ -77,46 +77,70 @@ Harness → Verifies signatures & expiration, decrypts, executes in WASM sandbox
 
 ### Keystore Interface
 
-Go interface ([`crypto/keystore/Keystore`](crypto/keystore/interface.go)) provides cryptographic operations without exposing private keys, allowing hardware-backed or cloud-based key storage:
+Go interface ([`crypto/keystore/Keystore`](crypto/keystore/interface.go)) provides **primitive-based** cryptographic operations without exposing private keys, allowing hardware-backed or cloud-based key storage. The interface exposes primitives only, not workflows - higher-level operations should be composed explicitly, making verification targets clear.
 
 ```go
 type KeyID string
+type Context []byte
 
 type Keystore interface {
-	PublicEd25519(id KeyID) (ed25519.PublicKey, error)
-	PublicX25519(id KeyID) ([32]byte, error)
-	SignDigest(id KeyID, digest []byte) ([]byte, error)
-	ECDH(id KeyID, peerPublic [32]byte) (sharedSecret [32]byte, err error)
-	SetPrivateKey(id KeyID, privateKey ed25519.PrivateKey) error
-	ListKeys() ([]KeyID, error)
+    // Identity of this keystore's key
+    KeyID() KeyID
+    PublicKey() (ed25519.PublicKey, error)
+    PublicKeyX25519() ([32]byte, error)
+
+    // Signing primitives with domain separation
+    Sign(msg, context Context) (sig []byte, err error)
+    Verify(pubKey ed25519.PublicKey, msg, sig, context Context) error
+
+    // Encryption primitives with domain separation
+    EncryptFor(recipientPub [32]byte, plaintext []byte, context Context) (ciphertext []byte, senderKeyID KeyID, err error)
+    Decrypt(ciphertext []byte, context Context) (plaintext []byte, receiverKeyID KeyID, err error)
+}
+
+// KeyManager provides key management operations (creation, import, listing)
+type KeyManager interface {
+    SetPrivateKey(id KeyID, privateKey ed25519.PrivateKey) error
+    ListKeys() ([]KeyID, error)
 }
 ```
 
-**KeyID**: Selects which local key in this keystore to use. It does NOT change algorithms – just which Ed25519/X25519 pair. Supports multiple keys per process (dev/prod, low/high risk, rotation).
+**KeyID**: A stable identifier for this keystore's key. Used for logging, rotation tracking, and chain-of-custody. The Keystore is bound to a specific key ID at creation time.
 
-**PublicEd25519**: Returns the Ed25519 public key for keyID.
+**Context**: Domain separation / Additional Authenticated Data (AAD) for cryptographic operations. Different contexts prevent cross-protocol attacks:
+- `harness:payload-signature` - EO signs encrypted payload
+- `harness:client-signature` - Target signs approval
+- `harness:symmetric-key` - Encrypt/decrypt symmetric keys
+- `harness:args` - Encrypt/decrypt execution arguments
+- `harness:envelope` - Encrypt/decrypt onion envelope layers
 
-**PublicX25519**: Returns the X25519 public key for keyID (32 bytes).
+**Sign/Verify**: Ed25519 signatures with domain separation. The signing process computes `SHA-256(context || msg)` then signs the digest. Verify takes an explicit `pubKey` parameter - this makes verification targets explicit (e.g., verify with EO's pubkey vs client's pubkey).
 
-**SignDigest**: Signs a canonical digest with the Ed25519 private key for keyID. Returns raw Ed25519 signature (64 bytes). In HCEEP this is used for:
-- EO: H_payload
-- Target: H_target
+**EncryptFor/Decrypt**: Hybrid encryption using X25519 + HKDF + AES-256-GCM. Wire format: `[ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]`. Returns the sender/receiver KeyID for logging and chain-of-custody.
 
-**ECDH**: Computes X25519(shared = sk(id) ⊗ peerPublic). In HCEEP this is used for:
-- Target: decrypt outer envelope E
-- Harness: unwrap Enc_K_sym and Enc_args
+**Creating a Bound Keystore**:
 
-Callers then run HKDF + AES-GCM using this shared secret.
+```go
+// For key management (create/list keys)
+km, err := keystore.NewKeystore()
+km.SetPrivateKey("my-key-id", privateKey)
 
-**EnvelopeCipher**: HCEEP-specific encryption/decryption is handled by the [`crypto/hceepcrypto`](crypto/hceepcrypto/envelope.go) package, which uses the keystore's ECDH method internally. The EnvelopeCipher interface provides:
+// For cryptographic operations (bound to specific key)
+ks, err := keystore.NewKeystoreForKey("my-key-id")
+sig, err := ks.Sign(msg, []byte("harness:payload-signature"))
+```
+
+**EnvelopeCipher**: HCEEP-specific encryption/decryption is handled by the [`crypto/hceepcrypto`](crypto/hceepcrypto/envelope.go) package, which wraps a bound Keystore:
 
 - `EncryptToPeer(peerPubX [32]byte, ctx Context, plaintext []byte) ([]byte, error)`
 - `DecryptFromPeer(ctx Context, blob []byte) ([]byte, error)`
 
-HKDF contexts are managed internally:
+Standard contexts for HCEEP protocol:
 - `ContextSymmetricKey` for symmetric keys
 - `ContextArgs` for execution arguments
 - `ContextEnvelope` for envelopes (onion encryption)
+- `ContextPayloadSignature` for EO payload signatures
+- `ContextClientSignature` for client approval signatures
 
 **Platform Implementations:**
 
@@ -128,11 +152,23 @@ HKDF contexts are managed internally:
 
 Harness uses a **registry pattern** for keystore implementations. To add a new keystore:
 
-1. **Implement the `Keystore` interface** (e.g., `crypto/keystore/cloudkms.go`)
-   - Implement `PublicEd25519`, `PublicX25519`, `SignDigest`, and `ECDH` methods
+1. **Implement `KeyManager` interface** for key management:
+   - `SetPrivateKey(id KeyID, privateKey ed25519.PrivateKey) error`
+   - `ListKeys() ([]KeyID, error)`
+   - `ForKey(id KeyID) (Keystore, error)` - creates a bound Keystore
+
+2. **Implement `Keystore` interface** for cryptographic operations:
+   - `KeyID() KeyID` - returns the bound key's identifier
+   - `PublicKey() (ed25519.PublicKey, error)` - returns Ed25519 public key
+   - `PublicKeyX25519() ([32]byte, error)` - returns X25519 public key
+   - `Sign(msg, context Context) (sig []byte, err error)` - signs with domain separation
+   - `Verify(pubKey ed25519.PublicKey, msg, sig, context Context) error` - verifies signature
+   - `EncryptFor(recipientPub [32]byte, plaintext []byte, context Context) (ciphertext []byte, senderKeyID KeyID, err error)`
+   - `Decrypt(ciphertext []byte, context Context) (plaintext []byte, receiverKeyID KeyID, err error)`
    - Private keys never leave secure storage - all operations happen through the keystore interface
-2. **Register in `init()`**: `RegisterKeystore("cloudkms", NewCloudKMSKeystore)`
-3. **Use automatically**: `NewKeystore()` looks up registered factories by platform
+
+3. **Register in `init()`**: `RegisterKeystore("cloudkms", NewCloudKMSKeyManager)`
+4. **Use automatically**: `NewKeystore()` and `NewKeystoreForKey()` look up registered factories by platform
 
 **Registry API:**
 
@@ -360,15 +396,6 @@ Harness uses a **registry pattern** for plugin loaders. To add a new loader:
 - **WASM**: Supported on all platforms via [Extism SDK](https://extism.org/) (wazero internally)
 - **Keystore**: Platform-specific implementations (macOS Keychain, Linux libsecret, Windows Credential Manager)
 - **Plugin Types**: Currently WASM only (extensible via registry pattern)
-
-## Legal & Compliance
-
-Helps meet compliance requirements (CREST, ISO 27001, SOC2, PCI DSS) through:
-
-- **Authorization boundaries**: Dual-authorization (exploit owner + target signatures)
-- **Chain-of-custody**: Cryptographic proof of approval
-- **Audit trails**: Verifiable signatures and keystore access logs
-- **Sandboxed execution**: WASM isolation boundaries
 
 ## Security Considerations
 
