@@ -1,254 +1,169 @@
-# Harness - Dual-Authorization Exploit Execution System
+Harness — Dual-Authorization Exploit Execution System
 
-A cryptographically secure system for storing, transporting, approving, and executing sensitive payloads including zero-day exploits and high-risk penetration testing tools. Harness enforces **dual-authorization** through cryptographic encryption and signatures, ensuring exploits cannot be executed without explicit approval from both the exploit owner (who encrypts the exploit) and the target (who signs execution arguments).
+Harness is a cryptographically secure framework for storing, transporting, approving, and executing sensitive payloads such as zero-day exploits and high-risk penetration testing tools. It enforces dual authorization through encryption and signatures, ensuring no single party can execute an exploit unilaterally.
 
-**Documentation**: [pkg.go.dev/github.com/joncooperworks/harness](https://pkg.go.dev/github.com/joncooperworks/harness)  
-**Protocol Specification**: [docs/RFC.md](docs/RFC.md) - HCEEP (Harness Cryptographic Execution Envelope Protocol)
+Documentation: https://pkg.go.dev/github.com/joncooperworks/harness
+Protocol: docs/RFC.md — HCEEP (Harness Cryptographic Execution Envelope Protocol)
 
-Harness can be used as a library, and the `cmd/...` packages are examples demonstrating how to integrate it into your own applications. You can deploy harness in various environments (AWS Lambda, containers, isolated VMs) to further limit access to payloads and enforce additional execution boundaries.
+Harness integrates with OS keystores, supports hardware-backed key storage, and executes exploits inside a sandboxed WASM runtime.
 
-## Purpose
+Features
+	•	Dual Authorization: Requires both Exploit Owner and Target signatures
+	•	Payload Confidentiality: AES-256-GCM with X25519 key exchange
+	•	Chain-of-Custody: EO and Target signatures tied to stable KeyIDs
+	•	Time-Limited Approvals: Target-signed expiration window
+	•	WASM Sandboxing: Deterministic, cross-platform execution via Extism
+	•	OS Keystore Integration: Private keys never leave secure storage
+	•	Pluggable Architecture: Add new keystores or plugin execution engines
 
-For offensive security teams and penetration testers who need to:
+1. Overview
 
-- Store and transport sensitive exploits (zero-days, PoCs, custom payloads)
-- Enforce authorization boundaries preventing unauthorized execution
-- Maintain chain-of-custody with cryptographic proof of approval
-- Protect exploit confidentiality during transit and storage
+Harness provides a cryptographic execution wrapper for offensive tooling. It guarantees:
+	•	Exploit Owner controls the exploit payload
+	•	Target controls authorization to run it
+	•	Harness operator cannot run anything without both approvals
 
-### Dual-Authorization Model
+2. Dual Authorization Model
 
-**Nobody can run an exploit unilaterally:**
+Execution requires all of the following:
+	1.	Exploit Owner
+	•	Encrypts payload
+	•	Signs payload digest
+	•	Cannot authorize execution
+	2.	Target
+	•	Decrypts inner envelope
+	•	Verifies EO signature
+	•	Signs arguments + expiration
+	•	Cannot decrypt payload
+	3.	Harness
+	•	Verifies both signatures
+	•	Checks expiration
+	•	Decrypts and executes payload in WASM
 
-1. **Exploit Owner** encrypts exploit and signs encrypted payload (has exploit, cannot authorize execution)
-2. **Target** decrypts envelope, verifies Exploit Owner signature (chain-of-custody), then signs execution arguments + expiration (has authorization, cannot decrypt exploit payload)
-3. **Harness (Pentester)** verifies signatures, decrypts, executes (needs both authorizations + valid expiration)
+Onion Encryption
+	•	Inner: encrypted to Target
+	•	Outer: encrypted to Harness
 
-**Result**: Execution requires exploit owner encryption + signature (control of payload) AND target signature (control of authorization). The envelope is encrypted to the target's public key (onion encryption), so an attacker with only the harness key cannot decrypt without also having the target key.
+3. Threat Model
 
-## Threat Model
+Threats Addressed
 
-### Threats Addressed
+Threat	Mitigation
+Unauthorized execution	Target signature on arguments + expiration
+Payload disclosure	AES-256-GCM; private keys in secure keystore
+Chain-of-custody	EO + Target signatures recorded with KeyIDs
+Stale approvals	Target-signed expiration
+Tampering	Signatures over SHA-256(context
+Replay within window	Allowed by design; expiration limits scope
 
-1. **Unauthorized Execution**: Target signature on arguments + expiration required
-2. **Exploit Confidentiality**: AES-256-GCM encryption with X25519 key exchange
-3. **Chain-of-Custody**: Non-repudiable cryptographic proof of approval
-4. **Stale Approvals**: Signed expiration timestamps prevent execution of old approvals
-5. **Compliance Violations**: Enforces authorization boundaries and maintains audit trails
+Out of Scope
+	•	Compromise of Target/Harness machines
+	•	WASM sandbox escapes
+	•	Insider with both key materials
+	•	Malware outside WASM runtime
 
-### Replay Attacks & Time-Limited Authorization
+4. Why Hash Before Signing?
 
-**Replays are intentionally allowed** within expiration window (default: 72h). Penetration testing requires multiple verification runs; time-limited expiration provides control mechanism.
+Harness signs:
 
-**Cryptographic Evidence**: System provides proof of:
+Sign( SHA-256(context || message) )
 
-- Which exploit was received (encrypted with harness public key)
-- Which target was authorized (target-signed arguments)
-- When authorization expires (signed expiration timestamp)
+Reasons:
+	1.	Strong domain separation between signature types
+	2.	Keystores never receive or process exploit payloads
+	3.	JSON and cross-language canonicalization safety
+	4.	Matches modern protocol practice (Signal, WireGuard)
 
-**Custom Decryptor Risk**: Mitigate by running exploits on locked-down, monitored hosts where custom decryptors cannot be deployed. Cryptographic evidence still shows exploit access even if execution is bypassed.
+5. Architecture
 
-### Why WASM Sandboxing?
+Envelope Structure (Pseudocode)
 
-- Deterministic, reproducible execution across platforms
-- Provides isolation boundaries to reduce host system impact
-- Limited filesystem exposure (subject to host function grants)
-- Controlled syscalls (only explicitly granted host functions)
-- Memory safety helps prevent buffer overflows and memory corruption
+EO_Signature = Sign_EO(
+    SHA256("harness:payload-signature" || payload)
+)
 
-**Note**: WASM sandboxing provides security boundaries but is not a perfect isolation mechanism. Vulnerabilities in the WASM runtime, host function implementations, or the underlying system can still pose risks. Always run exploits on isolated, monitored systems.
+Inner = Encrypt_X25519(TargetPub,
+    payload || EO_Signature
+)
 
-## Workflow
+Target_Signature = Sign_Target(
+    SHA256("harness:client-signature" ||
+           Hash(Inner) ||
+           args ||
+           expiration)
+)
 
-```
-Exploit Owner → Encrypts payload, signs hash, encrypts to target's public key
-    ↓
-Target → Decrypts envelope, signs expiration + arguments
-    ↓
-Harness → Verifies signatures & expiration, decrypts, executes in WASM sandbox
-```
+Outer = Encrypt_X25519(HarnessPub,
+    Inner || Target_Signature || args || expiration
+)
 
-**Execution requires all:**
+6. Workflow
 
-- ✓ Exploit owner encryption + signature
-- ✓ Target signature on payload hash + expiration + arguments
-- ✓ Valid expiration
+Exploit Owner → Encrypt payload + sign digest
+      ↓
+Target → Decrypt inner envelope, verify EO, sign args + expiration
+      ↓
+Harness → Verify, check expiration, decrypt, execute in WASM
 
-### Keystore Interface
+7. Plugin System (WASM)
 
-Go interface ([`crypto/keystore/Keystore`](crypto/keystore/interface.go)) provides **primitive-based** cryptographic operations without exposing private keys, allowing hardware-backed or cloud-based key storage. The interface exposes primitives only, not workflows - higher-level operations should be composed explicitly, making verification targets clear.
+Harness executes exploits compiled to WASM using Extism.
 
-```go
-type KeyID string
-type Context []byte
+Required Exported Functions
+
+Function	Description
+name()	Human-readable exploit name
+description()	Description text
+json_schema()	Arguments schema
+execute()	Executes exploit, returns JSON
+
+Plugin Interface (Go)
+
+type Plugin interface {
+    Name() string
+    Description() string
+    JSONSchema() string
+    Execute(ctx context.Context, args json.RawMessage) (interface{}, error)
+}
+
+8. Keystore Interface
 
 type Keystore interface {
-    // Identity of this keystore's key
     KeyID() KeyID
     PublicKey() (ed25519.PublicKey, error)
     PublicKeyX25519() ([32]byte, error)
 
-    // Signing primitives with domain separation
-    Sign(msg, context Context) (sig []byte, err error)
-    Verify(pubKey ed25519.PublicKey, msg, sig, context Context) error
+    Sign(msg, context []byte) ([]byte, error)
+    Verify(pub ed25519.PublicKey, msg, sig, context []byte) error
 
-    // Encryption primitives with domain separation
-    EncryptFor(recipientPub [32]byte, plaintext []byte, context Context) (ciphertext []byte, senderKeyID KeyID, err error)
-    Decrypt(ciphertext []byte, context Context) (plaintext []byte, receiverKeyID KeyID, err error)
+    EncryptFor(peer [32]byte, plaintext, context []byte) ([]byte, KeyID, error)
+    Decrypt(ciphertext, context []byte) ([]byte, KeyID, error)
 }
 
-// KeyManager provides key management operations (creation, import, listing)
-type KeyManager interface {
-    SetPrivateKey(id KeyID, privateKey ed25519.PrivateKey) error
-    ListKeys() ([]KeyID, error)
-}
-```
+Cryptographic Suite
+	•	Ed25519
+	•	X25519
+	•	HKDF-SHA256
+	•	AES-256-GCM
 
-**KeyID**: A stable identifier for this keystore's key. Used for logging, rotation tracking, and chain-of-custody. The Keystore is bound to a specific key ID at creation time.
+9. Security Considerations
+	•	Keys never leave secure keystores
+	•	WASM sandbox provides isolation but not full containment
+	•	Run Harness on isolated and monitored hosts
+	•	Replay allowed but expiration-bound
+	•	All cryptographic operations logged with KeyIDs
 
-**Context**: Domain separation / Additional Authenticated Data (AAD) for cryptographic operations. Different contexts prevent cross-protocol attacks:
-- `harness:payload-signature` - EO signs encrypted payload
-- `harness:client-signature` - Target signs approval
-- `harness:symmetric-key` - Encrypt/decrypt symmetric keys
-- `harness:args` - Encrypt/decrypt execution arguments
-- `harness:envelope` - Encrypt/decrypt onion envelope layers
+10. Quick Start
 
-**Sign/Verify**: Ed25519 signatures with domain separation. The signing process computes `SHA-256(context || msg)` then signs the digest. Verify takes an explicit `pubKey` parameter - this makes verification targets explicit (e.g., verify with EO's pubkey vs client's pubkey).
+Generate Keys
 
-**EncryptFor/Decrypt**: Hybrid encryption using X25519 + HKDF + AES-256-GCM. Wire format: `[ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]`. Returns the sender/receiver KeyID for logging and chain-of-custody.
-
-**Creating a Bound Keystore**:
-
-```go
-// For key management (create/list keys)
-km, err := keystore.NewKeystore()
-km.SetPrivateKey("my-key-id", privateKey)
-
-// For cryptographic operations (bound to specific key)
-ks, err := keystore.NewKeystoreForKey("my-key-id")
-sig, err := ks.Sign(msg, []byte("harness:payload-signature"))
-```
-
-**EnvelopeCipher**: HCEEP-specific encryption/decryption is handled by the [`crypto/hceepcrypto`](crypto/hceepcrypto/envelope.go) package, which wraps a bound Keystore:
-
-- `EncryptToPeer(peerPubX [32]byte, ctx Context, plaintext []byte) ([]byte, error)`
-- `DecryptFromPeer(ctx Context, blob []byte) ([]byte, error)`
-
-Standard contexts for HCEEP protocol:
-- `ContextSymmetricKey` for symmetric keys
-- `ContextArgs` for execution arguments
-- `ContextEnvelope` for envelopes (onion encryption)
-- `ContextPayloadSignature` for EO payload signatures
-- `ContextClientSignature` for client approval signatures
-
-**Platform Implementations:**
-
-- **macOS**: Keychain Access
-- **Linux**: libsecret/keyring
-- **Windows**: Credential Manager
-
-### Adding New Keystore Implementations
-
-Harness uses a **registry pattern** for keystore implementations. To add a new keystore:
-
-1. **Implement `KeyManager` interface** for key management:
-   - `SetPrivateKey(id KeyID, privateKey ed25519.PrivateKey) error`
-   - `ListKeys() ([]KeyID, error)`
-   - `ForKey(id KeyID) (Keystore, error)` - creates a bound Keystore
-
-2. **Implement `Keystore` interface** for cryptographic operations:
-   - `KeyID() KeyID` - returns the bound key's identifier
-   - `PublicKey() (ed25519.PublicKey, error)` - returns Ed25519 public key
-   - `PublicKeyX25519() ([32]byte, error)` - returns X25519 public key
-   - `Sign(msg, context Context) (sig []byte, err error)` - signs with domain separation
-   - `Verify(pubKey ed25519.PublicKey, msg, sig, context Context) error` - verifies signature
-   - `EncryptFor(recipientPub [32]byte, plaintext []byte, context Context) (ciphertext []byte, senderKeyID KeyID, err error)`
-   - `Decrypt(ciphertext []byte, context Context) (plaintext []byte, receiverKeyID KeyID, err error)`
-   - Private keys never leave secure storage - all operations happen through the keystore interface
-
-3. **Register in `init()`**: `RegisterKeystore("cloudkms", NewCloudKMSKeyManager)`
-4. **Use automatically**: `NewKeystore()` and `NewKeystoreForKey()` look up registered factories by platform
-
-**Registry API:**
-
-- `RegisterKeystore(platform string, factory KeystoreFactory)`
-- `GetKeystoreFactory(platform string) (KeystoreFactory, error)`
-- `ListRegisteredPlatforms() []string`
-
-Registry is thread-safe; implementations auto-register when imported.
-
-**Crypto Suite**: The keystore interface uses a fixed crypto suite (hard-coded, no algorithm agility):
-- Ed25519 for signatures
-- X25519 for key exchange
-- HKDF-SHA256 for key derivation
-- AES-256-GCM for authenticated encryption
-
-This design allows keys to remain in secure storage (HSMs, cloud KMS, Secure Enclave, TPM) and never be loaded into host memory. Implementations can swap in hardware-backed or cloud-based key storage transparently.
-
-## Features
-
-- **Cryptographic Security**: Ed25519 signatures, X25519 key exchange, AES-256-GCM encryption
-- **Cross-Platform**: macOS, Linux, Windows
-- **WASM Sandboxing**: Execution isolation via [Extism SDK](https://extism.org/) (provides security boundaries, not perfect isolation)
-- **OS Keystore Integration**: Private keys never written to disk
-- **Memory-Based Loading**: Exploits loaded directly from memory
-- **Dual-Authorization**: Requires principal encryption + client signature
-- **Pluggable keystores and plugin environments**: bring your own keystore or exploit framework
-
-## Building
-
-```bash
-go build -o bin/genkeys ./cmd/genkeys
-go build -o bin/encrypt ./cmd/encrypt
-go build -o bin/sign ./cmd/sign
-go build -o bin/harness ./cmd/harness
-go build -o bin/verify ./cmd/verify
-go build -o bin/listkeys ./cmd/listkeys
-```
-
-## Quick Start
-
-### 1. Generate Keys
-
-**Private keys stored in OS keystore, never written to disk:**
-
-```bash
-# Generate target keys (signs execution arguments)
 ./bin/genkeys -keystore-key "target-key" -public target_public.pem
-
-# Generate harness (pentester) keys (decrypts and executes)
 ./bin/genkeys -keystore-key "harness-key" -public harness_public.pem
-
-# Generate exploit owner keys (encrypts and signs exploit payload)
 ./bin/genkeys -keystore-key "exploit-key" -public exploit_public.pem
-
-# List all keys
 ./bin/listkeys
-```
 
-**Import existing PEM keys:**
+Encrypt Exploit Payload
 
-```bash
-./bin/genkeys -import target_private.pem -keystore-key "target-key" -public target_public.pem
-./bin/genkeys -import harness_private.pem -keystore-key "harness-key" -public harness_public.pem
-./bin/genkeys -import exploit_private.pem -keystore-key "exploit-key" -public exploit_public.pem
-# After importing, safely delete PEM files
-```
-
-### 2. Create WASM Exploit Payload
-
-Create WASM module using Extism PDK. Must export:
-
-- `name()` - exploit name (string)
-- `description()` - exploit description (string)
-- `json_schema()` - JSON schema for arguments (string)
-- `execute()` - executes with JSON args, returns JSON result
-
-See [Plugin API](#plugin-api) section for details.
-
-### 3. Encrypt Exploit
-
-```bash
 ./bin/encrypt \
   -plugin exploit.wasm \
   -type wasm \
@@ -256,13 +171,9 @@ See [Plugin API](#plugin-api) section for details.
   -target-key target_public.pem \
   -exploit-keystore-key "exploit-key" \
   -output exploit.encrypted
-```
 
-Plugin name is auto-loaded from the plugin. Exploit owner signs encrypted payload hash. Inner envelope encrypted to target's public key (onion encryption) - attacker needs both harness and target keys to decrypt.
+Target Signs Arguments
 
-### 4. Target Signs Execution Arguments
-
-```bash
 ./bin/sign \
   -file exploit.encrypted \
   -target-keystore-key "target-key" \
@@ -271,135 +182,27 @@ Plugin name is auto-loaded from the plugin. Exploit owner signs encrypted payloa
   -args '{"target":"192.168.1.100","port":443}' \
   -expiration 72h \
   -output exploit.approved
-```
 
-Target decrypts envelope (proves key access), **verifies Exploit Owner signature** (ensures chain-of-custody), encrypts arguments with harness public key, signs payload hash + expiration + arguments. Default expiration: `72h` (examples: `24h`, `168h`, `30m`).
+Execute
 
-### 5. Execute Exploit
-
-```bash
 ./bin/harness \
   -file exploit.approved \
   -harness-keystore-key "harness-key" \
   -target-key target_public.pem \
   -exploit-key exploit_public.pem
-```
 
-Arguments auto-extracted from approved package (signed by target). Cannot override.
+11. Execution Logging
 
-## Execution Logging
+All cryptographic operations emit structured logs including:
+	•	Timestamp
+	•	Operation type
+	•	SHA256 hashes of payloads, signatures, and keys
+	•	KeyIDs used
 
-All commands log cryptographic operations to stderr in JSON format (ISO 8601 timestamps, SHA256 hashes of signatures, keys, and payloads).
+Logs are written to stderr.
 
-**Common fields:**
-
-- `time`: ISO 8601 timestamp (nanosecond precision)
-- `level`: Log level (INFO, ERROR)
-- `msg`: Log identifier ("encryption log", "signing log", "verification log", "execution log")
-- `*_hash_sha256`: SHA256 hashes of signatures, public keys, and payloads
-
-**Command-specific fields:**
-
-- **encrypt**: `exploit_owner_signature_hash_sha256`, `exploit_owner_public_key_hash_sha256`, `harness_public_key_hash_sha256`
-- **sign**: `encrypted_payload_hash_sha256`, `target_public_key_hash_sha256`
-- **verify**: All signature and key hashes from both exploit owner and target
-- **harness**: All above plus `plugin_type`, `plugin_name`, `exploit_binary_hash_sha256`
-
-Logs written to stderr (won't interfere with JSON stdout). Provides complete audit trail for compliance.
-
-## OS Keystore Integration
-
-Private keys stored in OS keystore, never written to disk.
-
-**Platform Support:**
-
-- **macOS**: Keychain Access (service: `harness`). Default: Login keychain. Custom: `export HARNESS_KEYCHAIN="harness-keys"`. Reduce prompts: Trust app in Keychain Access.
-- **Linux**: libsecret/keyring (service: `harness`)
-- **Windows**: Credential Manager (service: `harness`)
-
-## Architecture
-
-Harness implements the **HCEEP (Harness Cryptographic Execution Envelope Protocol)** which provides dual-authorization through cryptographic encryption and signatures. For complete protocol specifications, see [docs/RFC.md](docs/RFC.md).
-
-### High-Level Flow
-
-1. **Exploit Owner** encrypts the exploit payload and signs it, then encrypts the inner envelope to the target's public key (onion encryption)
-2. **Target** decrypts the envelope, verifies Exploit Owner signature (ensures chain-of-custody), then signs execution arguments and expiration, creating an approved package
-3. **Harness** verifies both signatures, checks expiration, decrypts the payload, and executes it in a WASM sandbox
-
-### Key Components
-
-- **Cryptographic Operations**: Ed25519 signatures, X25519 key exchange, AES-256-GCM encryption
-- **Onion Encryption**: Inner envelope encrypted to target, reducing compromise risk
-- **Keystore Interface**: Pluggable key storage (OS keystores, HSMs, cloud KMS)
-- **Plugin System**: Pluggable execution environments (WASM via Extism, extensible to other formats)
-- **Registry Pattern**: Both keystores and plugin loaders use registries for easy extension
-
-For detailed file format specifications, cryptographic algorithms, and security properties, refer to the [RFC](docs/RFC.md).
-
-## Plugin API
-
-Harness uses **[Extism SDK](https://extism.org/)** for WASM execution. Exploits must use **[Extism PDK](https://extism.org/docs/quickstart/plugin-quickstart)** and export:
-
-### Required Exported Functions
-
-1. **`name()`** → exploit name (string)
-2. **`description()`** → exploit description (string)
-3. **`json_schema()`** → JSON schema for arguments (string)
-4. **`execute()`** → executes with JSON args, returns JSON result
-
-Extism PDK provides input/output handling, HTTP client, and WASI support (file I/O, networking, subject to host function grants).
-
-### Example Plugins
-
-| Example | Description |
-|---------|-------------|
-| [`examples/get-ip/`](examples/get-ip/) | Fetches IP information from ipconfig.io using HTTP requests |
-| [`examples/hello-world/`](examples/hello-world/) | Simple hello world plugin demonstrating basic plugin structure |
-| [`examples/cve-2025-55182/`](examples/cve-2025-55182/) | Exploits CVE-2025-55182, a Next.js and React.js vulnerability involving prototype pollution and command injection |
-
-Each includes complete Rust source, `Cargo.toml`, build instructions, and usage examples.
-
-### Plugin Interface (Go)
-
-Harness is engine-agnostic and supports multiple plugin formats through a unified interface. The WASM loader ([`plugin/wasm/loader.go`](plugin/wasm/loader.go)) is one such implementation that translates between the Go interface and [Extism SDK](https://extism.org/) calls to WASM modules compiled to `wasm32-wasip1` target.
-
-```go
-type Plugin interface {
-    Name() string
-    Description() string
-    JSONSchema() string
-    Execute(ctx context.Context, args json.RawMessage) (interface{}, error)
-}
-```
-
-**Extensibility**: You can add support for other plugin formats (e.g., Go plugins, Python scripts, native binaries) by creating an implementation of this interface.
-
-### Adding New Plugin Loader Implementations
-
-Harness uses a **registry pattern** for plugin loaders. To add a new loader:
-
-1. **Create loader** implementing `Loader` interface (e.g., `plugin/python.go`)
-2. **Register in `init()`**: `RegisterLoader("python", NewPythonLoader)`
-3. **Implement `Plugin` interface** for your plugin type
-4. **Use**: `payload.Type = "python"` (matches registered identifier)
-
-**Registry API:**
-
-- `RegisterLoader(typeIdentifier string, factory LoaderFactory)`
-- `GetLoaderFactory(typeIdentifier string) (LoaderFactory, error)`
-- `ListRegisteredPluginTypes() []string`
-
-## Platform Notes
-
-- **WASM**: Supported on all platforms via [Extism SDK](https://extism.org/) (wazero internally)
-- **Keystore**: Platform-specific implementations (macOS Keychain, Linux libsecret, Windows Credential Manager)
-- **Plugin Types**: Currently WASM only (extensible via registry pattern)
-
-## Security Considerations
-
-- Private keys in OS keystore (never on disk)
-- Public keys: distribute securely
-- Encrypted exploits: safe over insecure channels
-- Signature verification: ensures payload authenticity and argument approval
-- Onion encryption: requires both harness and target keys to decrypt
+12. Platform Notes
+	•	macOS: Keychain Access
+	•	Linux: libsecret
+	•	Windows: Credential Manager
+	•	WASM: Extism (wazero-based)
