@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/pem"
 	"flag"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/joncooperworks/harness/crypto"
+	"github.com/joncooperworks/harness/crypto/hceepcrypto"
 	"github.com/joncooperworks/harness/crypto/keystore"
 	"github.com/joncooperworks/harness/plugin"
 )
@@ -75,28 +77,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Read plugin file to extract name
-	pluginData, err := os.ReadFile(*pluginFile)
-	if err != nil {
-		logger.Error("failed to read plugin file", "error", err, "file", *pluginFile)
-		os.Exit(1)
-	}
-
-	// Load plugin to get its name
-	tempPayload := &crypto.Payload{
-		Type: crypto.PluginTypeString(*pluginType),
-		Name: "", // Temporary - plugin will provide its own name
-		Data: pluginData,
-	}
-	plg, err := plugin.LoadPlugin(tempPayload)
-	if err != nil {
-		logger.Error("failed to load plugin", "error", err)
-		os.Exit(1)
-	}
-	pluginName := plg.Name()
-	// Note: Plugin interface doesn't have Close(), but implementations may have cleanup
-	// For WASM plugins, resources are managed by the plugin loader
-
 	// Get exploit owner public key for logging
 	exploitPubKey, err := exploitKs.PublicKey()
 	if err != nil {
@@ -104,20 +84,100 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Encrypt plugin using library function
-	encryptReq := &crypto.EncryptPluginRequest{
-		PluginData:        bytes.NewReader(pluginData),
-		PluginType:        *pluginType,
-		PluginName:        pluginName,
-		HarnessPubKey:     harnessPubKey,
-		TargetPubKey:      targetPubKey,
-		PrincipalKeystore: exploitKs,
+	// Read plugin file
+	fileData, err := os.ReadFile(*pluginFile)
+	if err != nil {
+		logger.Error("failed to read plugin file", "error", err, "file", *pluginFile)
+		os.Exit(1)
 	}
 
-	result, err := crypto.EncryptPlugin(encryptReq)
-	if err != nil {
-		logger.Error("failed to encrypt plugin", "error", err)
-		os.Exit(1)
+	// Try to detect if this is a stored file by attempting to decrypt with exploit owner keystore
+	var pluginData []byte
+	var pluginName string
+	var result *crypto.EncryptPluginResult
+
+	enc := hceepcrypto.NewEnvelopeCipher(exploitKs)
+	innerEnvelope, decryptErr := enc.DecryptFromPeer(hceepcrypto.ContextEnvelope, fileData)
+
+	if decryptErr == nil {
+		// Successfully decrypted - this is a stored file
+		// Re-encrypt the inner envelope to the target's public key
+		targetPubX, err := keystore.Ed25519ToX25519PublicKey(targetPubKey)
+		if err != nil {
+			logger.Error("failed to convert target public key to X25519", "error", err)
+			os.Exit(1)
+		}
+		var targetPubX32 [32]byte
+		copy(targetPubX32[:], targetPubX)
+
+		// Re-encrypt inner envelope to target
+		encryptedEnvelope, err := enc.EncryptToPeer(targetPubX32, hceepcrypto.ContextEnvelope, innerEnvelope)
+		if err != nil {
+			logger.Error("failed to re-encrypt envelope to target", "error", err)
+			os.Exit(1)
+		}
+
+		// Extract principal signature from inner envelope for logging
+		// Format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig]...
+		const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
+		if len(innerEnvelope) < headerSize+4 {
+			logger.Error("inner envelope too short")
+			os.Exit(1)
+		}
+
+		// Extract principal signature
+		principalSigLen := int(binary.BigEndian.Uint32(innerEnvelope[headerSize : headerSize+4]))
+		if len(innerEnvelope) < headerSize+4+principalSigLen {
+			logger.Error("inner envelope too short for principal signature")
+			os.Exit(1)
+		}
+		principalSignature := make([]byte, principalSigLen)
+		copy(principalSignature, innerEnvelope[headerSize+4:headerSize+4+principalSigLen])
+
+		// We can't extract the plugin name without decrypting the payload (which requires harness private key)
+		// So we'll use a placeholder - the actual name will be available after target signs
+		pluginName = "stored-plugin"
+
+		// Create result with re-encrypted envelope
+		result = &crypto.EncryptPluginResult{
+			EncryptedData:      encryptedEnvelope,
+			PluginName:         pluginName,
+			PrincipalSignature: principalSignature,
+		}
+
+		logger.Info("detected stored file", "file", *pluginFile, "re_encrypted_to", "target")
+	} else {
+		// Not a stored file - treat as raw binary
+		pluginData = fileData
+
+		// Load plugin to get its name
+		tempPayload := &crypto.Payload{
+			Type: crypto.PluginTypeString(*pluginType),
+			Name: "", // Temporary - plugin will provide its own name
+			Data: pluginData,
+		}
+		plg, err := plugin.LoadPlugin(tempPayload)
+		if err != nil {
+			logger.Error("failed to load plugin", "error", err)
+			os.Exit(1)
+		}
+		pluginName = plg.Name()
+
+		// Encrypt plugin using library function
+		encryptReq := &crypto.EncryptPluginRequest{
+			PluginData:        bytes.NewReader(pluginData),
+			PluginType:        *pluginType,
+			PluginName:        pluginName,
+			HarnessPubKey:     harnessPubKey,
+			TargetPubKey:      targetPubKey,
+			PrincipalKeystore: exploitKs,
+		}
+
+		result, err = crypto.EncryptPlugin(encryptReq)
+		if err != nil {
+			logger.Error("failed to encrypt plugin", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Calculate hash of exploit owner signature for logging
