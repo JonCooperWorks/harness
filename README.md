@@ -15,7 +15,6 @@ For offensive security teams and penetration testers who need to:
 - Enforce authorization boundaries preventing unauthorized execution
 - Maintain chain-of-custody with cryptographic proof of approval
 - Protect exploit confidentiality during transit and storage
-- Meet compliance requirements (CREST, ISO 27001, SOC2, PCI)
 
 ### Dual-Authorization Model
 
