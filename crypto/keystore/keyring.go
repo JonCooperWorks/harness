@@ -349,4 +349,3 @@ func (k *keyringKeystore) getPrivateKey() (ed25519.PrivateKey, error) {
 
 	return nil, fmt.Errorf("failed to parse private key: unsupported format")
 }
-

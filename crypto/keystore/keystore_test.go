@@ -72,13 +72,13 @@ func (m *MockKeystore) EncryptFor(recipientPub [32]byte, plaintext []byte, conte
 	// Real implementation uses ECDH + HKDF + AES-GCM
 	// Format: [ephemeral_pub:32][nonce:12][length:4][plaintext][tag:16]
 	result := make([]byte, 32+12+4+len(plaintext)+16)
-	rand.Read(result[:44])                                                    // Random ephemeral pub + nonce
-	result[44] = byte(len(plaintext) >> 24)                                   // Length (big endian)
+	rand.Read(result[:44])                  // Random ephemeral pub + nonce
+	result[44] = byte(len(plaintext) >> 24) // Length (big endian)
 	result[45] = byte(len(plaintext) >> 16)
 	result[46] = byte(len(plaintext) >> 8)
 	result[47] = byte(len(plaintext))
-	copy(result[48:48+len(plaintext)], plaintext)                            // Simplified: just copy plaintext
-	rand.Read(result[48+len(plaintext):])                                     // Random tag
+	copy(result[48:48+len(plaintext)], plaintext) // Simplified: just copy plaintext
+	rand.Read(result[48+len(plaintext):])         // Random tag
 	return result, m.keyID, nil
 }
 
@@ -439,4 +439,3 @@ func TestEd25519ToX25519KeyConversion(t *testing.T) {
 		}
 	})
 }
-

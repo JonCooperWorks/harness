@@ -195,4 +195,3 @@ func loadPublicKey(path string) (ed25519.PublicKey, error) {
 
 	return ed25519PubKey, nil
 }
-
