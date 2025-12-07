@@ -74,6 +74,18 @@ WASM is the default execution environment. Plugins use the Extism PDK and must e
 
 Each example includes source code, build instructions, and usage examples.
 
+## CLI Tooling
+
+Harness ships focused binaries in `./bin` so you can compose workflows that match your trust boundaries:
+
+- `./bin/genkeys` — Create Ed25519/X25519 keypairs inside the configured keystore. Use it once per principal.
+- `./bin/listkeys` — Inspect which KeyIDs the keystore exposes and confirm provisioning succeeded.
+- `./bin/store` — (Optional) Self-encrypt plugins to the exploit owner's key so they can be cached or ferried between systems without leaking payloads.
+- `./bin/encrypt` — Wrap a plugin for a specific target + harness keypair, producing the dual-layer envelope.
+- `./bin/sign` — Let the target review the envelope, attach execution arguments, and add the expiration window.
+- `./bin/verify` — Non-destructive validation step to ensure an envelope has the expected signatures before execution.
+- `./bin/harness` — Final executor that validates signatures, decrypts, and runs the plugin inside Extism.
+
 ## Quick Start
 
 ### 1. Generate Keys
@@ -85,7 +97,22 @@ Each example includes source code, build instructions, and usage examples.
 ./bin/listkeys
 ```
 
-### 2. Encrypt Payload
+### 2. (Optional) Pre-store Plugin
+
+Use the `store` command when you want to cache or transport a plugin without handing a raw payload to other teams. The output stays encrypted to your exploit owner key, so only you can recover it later.
+
+```bash
+./bin/store \
+  -plugin exploit.wasm \
+  -type wasm \
+  -harness-key harness_public.pem \
+  -exploit-keystore-key "exploit-key" \
+  -output exploit.wasm.stored
+```
+
+You can hand the resulting `.stored` artifact to `./bin/encrypt` instead of the raw WASM whenever you're ready to target a specific environment.
+
+### 3. Encrypt Payload
 
 ```bash
 ./bin/encrypt \
@@ -97,7 +124,7 @@ Each example includes source code, build instructions, and usage examples.
   -output exploit.encrypted
 ```
 
-### 3. Target Signs Arguments
+### 4. Target Signs Arguments
 
 ```bash
 ./bin/sign \
@@ -110,7 +137,7 @@ Each example includes source code, build instructions, and usage examples.
   -output exploit.approved
 ```
 
-### 4. Execute
+### 5. Execute
 
 ```bash
 ./bin/harness \
