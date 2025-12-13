@@ -13,7 +13,7 @@ Cryptographically secure framework for storing, transporting, approving, and exe
 - **Payload Confidentiality:** AES-256-GCM with X25519  
 - **Chain-of-Custody:** EO + Target signatures tied to stable KeyIDs  
 - **Time-Limited Approvals:** Target-signed expiration window  
-- **WASM Sandboxing:** Deterministic execution with Extism  
+- **Cross-Platform Execution:** WASM via Extism for consistent behavior across OS/arch  
 - **OS Keystore Integration:** Keys never leave secure storage  
 
 ---
@@ -263,9 +263,10 @@ Keys remain in OS keystores or HSMs.
 
 **Out of scope:**
 - Compromised Target/Harness hosts
-- WASM sandbox escape vulnerabilities
 - Insider with both private keys
-- Malware outside WASM runtime
+- Host-level malware or kernel exploits
+
+> **Note on WASM:** WASM is used as a cross-platform execution environment for consistent behavior across operating systems and architectures — **not as a security sandbox**. Plugins have network access and can make HTTP requests. Run Harness on isolated, monitored systems appropriate for executing untrusted exploit code.
 
 ---
 
@@ -308,7 +309,7 @@ stdout remains clean for plugin output.
 ## Security Considerations
 
 - Keys never exist outside secure storage
-- WASM sandbox provides isolation but not perfect containment
-- Run Harness on isolated, monitored systems
+- WASM provides cross-platform consistency, **not sandboxing** — plugins can access the network
+- Run Harness on isolated, monitored systems appropriate for executing untrusted code
 - Replay allowed but expiration-bound
 - All cryptographic actions logged with KeyIDs

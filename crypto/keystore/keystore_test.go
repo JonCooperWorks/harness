@@ -2,8 +2,13 @@ package keystore
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -47,52 +52,157 @@ func (m *MockKeystore) PublicKeyX25519() ([32]byte, error) {
 	if err != nil {
 		return [32]byte{}, err
 	}
-	var x25519Pub [32]byte
-	// Use scalar base mult to get public key
-	// This is a simplified version - real impl uses curve25519
-	copy(x25519Pub[:], x25519Priv) // Placeholder for test
-	return x25519Pub, nil
+	// Compute X25519 public key from private key using scalar base multiplication
+	return ScalarBaseMult(x25519Priv)
 }
 
+// Sign creates an Ed25519 signature over the message with domain separation.
+// The signing process computes SHA-256(context || msg) then signs the digest.
+// This matches the real keystore implementation exactly.
 func (m *MockKeystore) Sign(msg, context Context) ([]byte, error) {
-	// Note: This mock uses direct signing without the context hash
-	// Real implementation should hash context || msg
-	return ed25519.Sign(m.privateKey, append(context, msg...)), nil
+	// Compute digest with domain separation: SHA-256(context || msg)
+	h := sha256.New()
+	h.Write(context)
+	h.Write(msg)
+	digest := h.Sum(nil)
+
+	// Ed25519.Sign returns a 64-byte signature
+	signature := ed25519.Sign(m.privateKey, digest)
+	return signature, nil
 }
 
+// Verify checks an Ed25519 signature against the provided public key.
+// The verification process computes SHA-256(context || msg) then verifies.
+// This matches the real keystore implementation exactly.
 func (m *MockKeystore) Verify(pubKey ed25519.PublicKey, msg, sig, context Context) error {
-	if !ed25519.Verify(pubKey, append(context, msg...), sig) {
-		return ErrInvalidKeySize // Reuse error for simplicity
+	// Compute digest with domain separation: SHA-256(context || msg)
+	h := sha256.New()
+	h.Write(context)
+	h.Write(msg)
+	digest := h.Sum(nil)
+
+	if !ed25519.Verify(pubKey, digest, sig) {
+		return errors.New("signature verification failed")
 	}
 	return nil
 }
 
+// EncryptFor encrypts plaintext for a recipient using hybrid encryption.
+// Wire format: [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
+// This matches the real keystore implementation exactly.
 func (m *MockKeystore) EncryptFor(recipientPub [32]byte, plaintext []byte, context Context) ([]byte, KeyID, error) {
-	// Simplified encryption for testing - stores length prefix + plaintext
-	// Real implementation uses ECDH + HKDF + AES-GCM
-	// Format: [ephemeral_pub:32][nonce:12][length:4][plaintext][tag:16]
-	result := make([]byte, 32+12+4+len(plaintext)+16)
-	rand.Read(result[:44])                  // Random ephemeral pub + nonce
-	result[44] = byte(len(plaintext) >> 24) // Length (big endian)
-	result[45] = byte(len(plaintext) >> 16)
-	result[46] = byte(len(plaintext) >> 8)
-	result[47] = byte(len(plaintext))
-	copy(result[48:48+len(plaintext)], plaintext) // Simplified: just copy plaintext
-	rand.Read(result[48+len(plaintext):])         // Random tag
+	// Generate ephemeral Ed25519 key pair
+	ephemeralPublic, ephemeralPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to generate ephemeral key: %w", err)
+	}
+
+	// Convert Ed25519 keys to X25519 for key exchange
+	ephemeralX25519Private, err := Ed25519ToX25519PrivateKey(ephemeralPrivate)
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to convert ephemeral private key to X25519: %w", err)
+	}
+
+	// Compute shared secret using X25519
+	sharedSecret, err := ScalarMult(ephemeralX25519Private, recipientPub)
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to compute shared secret: %w", err)
+	}
+
+	// Derive AES key from shared secret using HKDF with context
+	aesKey, err := DeriveKeyFromSecret(sharedSecret[:], context)
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to derive key: %w", err)
+	}
+
+	// Encrypt with AES-GCM
+	nonce := make([]byte, 12) // GCM standard nonce size
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to generate nonce: %w", err)
+	}
+
+	block, err := aes.NewCipher(aesKey[:])
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
+
+	// Encode ephemeral X25519 public key (32 bytes)
+	ephemeralX25519PubBytes, err := Ed25519ToX25519PublicKey(ephemeralPublic)
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to convert ephemeral public key to X25519: %w", err)
+	}
+
+	// Build result: [ephemeral_x25519_public_key:32][nonce:12][ciphertext+tag]
+	result := make([]byte, 0, 32+12+len(ciphertext))
+	result = append(result, ephemeralX25519PubBytes...)
+	result = append(result, nonce...)
+	result = append(result, ciphertext...)
+
 	return result, m.keyID, nil
 }
 
+// Decrypt decrypts ciphertext that was encrypted to this keystore's key.
+// This matches the real keystore implementation exactly.
 func (m *MockKeystore) Decrypt(ciphertext []byte, context Context) ([]byte, KeyID, error) {
-	if len(ciphertext) < 64 { // ephemeral_pub(32) + nonce(12) + length(4) + tag(16)
-		return nil, m.keyID, ErrInvalidKeySize
+	if len(ciphertext) < 32+12+16 { // Need at least ephemeral key (32) + nonce (12) + tag (16)
+		return nil, m.keyID, errors.New("encrypted blob too short")
 	}
-	// Extract length from ciphertext
-	length := int(ciphertext[44])<<24 | int(ciphertext[45])<<16 | int(ciphertext[46])<<8 | int(ciphertext[47])
-	if len(ciphertext) < 48+length+16 {
-		return nil, m.keyID, ErrInvalidKeySize
+
+	// Extract ephemeral X25519 public key (32 bytes)
+	var ephemeralX25519PubKey [32]byte
+	copy(ephemeralX25519PubKey[:], ciphertext[:32])
+
+	// Convert our private key to X25519
+	x25519PrivateKey, err := Ed25519ToX25519PrivateKey(m.privateKey)
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to convert private key to X25519: %w", err)
 	}
-	// Simplified decryption for testing - extract plaintext using length
-	return ciphertext[48 : 48+length], m.keyID, nil
+
+	// Compute shared secret using X25519
+	sharedSecret, err := ScalarMult(x25519PrivateKey, ephemeralX25519PubKey)
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to compute shared secret: %w", err)
+	}
+
+	// Derive AES key from shared secret using HKDF with context
+	aesKey, err := DeriveKeyFromSecret(sharedSecret[:], context)
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to derive key: %w", err)
+	}
+
+	// Extract nonce and ciphertext
+	encryptedData := ciphertext[32:]
+	if len(encryptedData) < 12+16 { // Need at least nonce (12) + tag (16)
+		return nil, m.keyID, errors.New("encrypted data too short")
+	}
+
+	nonce := encryptedData[:12]
+	data := encryptedData[12:]
+
+	block, err := aes.NewCipher(aesKey[:])
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	// Decrypt and verify authentication tag
+	plaintext, err := gcm.Open(nil, nonce, data, nil)
+	if err != nil {
+		return nil, m.keyID, fmt.Errorf("failed to decrypt: %w", err)
+	}
+
+	return plaintext, m.keyID, nil
 }
 
 // TestKeyIDWiredCorrectly verifies that KeyID returns the correct identifier.

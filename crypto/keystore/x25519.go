@@ -43,8 +43,13 @@ func Ed25519ToX25519PublicKey(ed25519PublicKey ed25519.PublicKey) ([]byte, error
 	}
 
 	// Ed25519 public key is the y-coordinate (little-endian, 32 bytes) with a sign bit for x
+	// in the most significant bit of the last byte. We must clear this bit before extracting y.
+	pubKeyCopy := make([]byte, 32)
+	copy(pubKeyCopy, ed25519PublicKey)
+	pubKeyCopy[31] &= 0x7F // Clear the sign bit (MSB of last byte)
+
 	// Extract y coordinate from the public key bytes
-	y := new(big.Int).SetBytes(reverseBytes(ed25519PublicKey)) // Convert from little-endian
+	y := new(big.Int).SetBytes(reverseBytes(pubKeyCopy)) // Convert from little-endian
 
 	// Curve25519 prime: p = 2^255 - 19
 	p := new(big.Int)
@@ -83,7 +88,9 @@ func Ed25519ToX25519PublicKey(ed25519PublicKey ed25519.PublicKey) ([]byte, error
 	if len(uBytes) > 32 {
 		return nil, errors.New("converted X25519 public key exceeds 32 bytes")
 	}
-	copy(result, uBytes)
+	// u.Bytes() returns big-endian with no leading zeros, so we need to
+	// right-align it in the 32-byte buffer before reversing to little-endian
+	copy(result[32-len(uBytes):], uBytes)
 	reverseBytesInPlace(result) // Convert to little-endian
 
 	return result, nil
