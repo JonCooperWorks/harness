@@ -63,4 +63,8 @@ type Payload struct {
 	// Data is the raw plugin binary data (e.g., WASM module bytes).
 	// This is base64-encoded when marshaled to JSON.
 	Data []byte `json:"data"`
+	// Args contains the JSON execution arguments that were signed by the client
+	// and encrypted for the pentester. This field is populated during decryption
+	// and is not part of the serialized payload format.
+	Args []byte `json:"-"`
 }

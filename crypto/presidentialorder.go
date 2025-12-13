@@ -318,6 +318,9 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, fmt.Errorf("failed to decrypt arguments: %w", err)
 	}
 
+	// Populate Args in the Payload for use during plugin loading
+	payload.Args = decryptedArgs
+
 	return &DecryptedResult{
 		Payload:            &payload,
 		Args:               decryptedArgs,
