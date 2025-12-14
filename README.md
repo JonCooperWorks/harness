@@ -74,9 +74,22 @@ WASM is the default execution environment. Plugins use the Extism PDK and must e
 
 Each example includes source code, build instructions, and usage examples.
 
-## CLI Tooling
+## Library Usage
 
-Harness ships focused binaries in `./bin` so you can compose workflows that match your trust boundaries:
+Harness is designed as a library first, enabling integration with Identity Providers (IDPs), existing infrastructure, and custom workflows. The CLI tools in `./bin` are reference implementations that demonstrate how to use the library APIs.
+
+**Key library components:**
+- `executor.ExecutePlugin()` — Execute plugins with full hash-based audit logging
+- `crypto.Encrypt()` — Encrypt payloads with dual-layer encryption
+- `crypto.Sign()` — Sign execution arguments with expiration windows
+- `crypto.VerifyAndDecrypt()` — Verify signatures and decrypt payloads
+- `plugin.Registry` — Load and execute plugins from various runtimes
+
+Use these APIs to integrate Harness into your existing systems, CI/CD pipelines, or security tooling. The library returns structured data (hashes, results) rather than performing logging directly, giving you full control over how audit logs are handled.
+
+## CLI Tooling (Reference Implementation)
+
+The CLI tools in `./bin` are reference implementations that demonstrate library usage:
 
 - `./bin/genkeys` — Create Ed25519/X25519 keypairs inside the configured keystore. Use it once per principal.
 - `./bin/listkeys` — Inspect which KeyIDs the keystore exposes and confirm provisioning succeeded.
@@ -296,13 +309,18 @@ The keystore interface is pluggable. Implement custom keystores for cloud KMS, H
 
 ## Execution Logging
 
-Structured logs to stderr include:
-- Timestamp
-- Operation type
-- SHA-256 hashes of payloads, signatures, keys
-- KeyIDs involved
+Harness uses an API-based logging strategy. Library functions (like `executor.ExecutePlugin`) return structured data containing all relevant SHA-256 hashes rather than performing logging directly. This allows callers to control how and where logs are written.
 
-stdout remains clean for plugin output.
+The execution API returns `ExecutionHashes` containing:
+- Encrypted payload hash
+- Decrypted exploit binary hash
+- Exploit owner signature hash
+- Exploit owner public key hash
+- Target signature hash
+- Target public key hash
+- Harness public key hash
+
+The CLI tools log these hashes to stderr in structured JSON format, including timestamps, operation types, and KeyIDs. stdout remains clean for plugin output.
 
 ---
 
