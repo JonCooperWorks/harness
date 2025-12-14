@@ -99,7 +99,7 @@ Use these APIs to integrate Harness into your existing systems, CI/CD pipelines,
 
 ## CLI Tooling (Reference Implementation)
 
-The CLI tools in `./bin` are reference implementations that demonstrate library usage:
+The CLI tools in `cmd/` are reference implementations that demonstrate library usage:
 
 - `./bin/genkeys` — Create Ed25519/X25519 keypairs inside the configured keystore. Use it once per principal.
 - `./bin/listkeys` — Inspect which KeyIDs the keystore exposes and confirm provisioning succeeded.
