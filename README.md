@@ -65,7 +65,7 @@ type Plugin interface {
 
 ### WASM Plugins (Default)
 
-WASM is the default execution environment. Plugins use the Extism PDK and must export four functions:
+WASM is the default execution environment. Plugins can be written in any language supported by [Extism](https://extism.org/) (Rust, Go, Python, JavaScript, C, C++, Ruby, PHP, Zig, Haskell, and more). Plugins use the [Extism PDK](https://extism.org/) and must export four functions:
 
 | Function | Returns | Purpose |
 |----------|---------|---------|
