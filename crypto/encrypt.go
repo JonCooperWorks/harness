@@ -8,7 +8,10 @@ import (
 	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +51,16 @@ type EncryptPluginRequest struct {
 	PrincipalKeystore keystore.Keystore
 }
 
+// EncryptHashes contains all SHA256 hashes calculated during encryption.
+type EncryptHashes struct {
+	// ExploitOwnerSignatureHash is the SHA256 hash of the exploit owner's signature.
+	ExploitOwnerSignatureHash string
+	// ExploitOwnerPublicKeyHash is the SHA256 hash of the exploit owner's public key.
+	ExploitOwnerPublicKeyHash string
+	// HarnessPublicKeyHash is the SHA256 hash of the harness (pentester's) public key.
+	HarnessPublicKeyHash string
+}
+
 // EncryptPluginResult contains the encrypted plugin data and metadata.
 //
 // The EncryptedData field contains the encrypted envelope (E), which is the inner envelope
@@ -62,9 +75,11 @@ type EncryptPluginResult struct {
 	EncryptedData []byte
 	// PluginName is the name extracted from the plugin or provided in the request.
 	PluginName string
-	// PrincipalSignature is the exploit owner's signature (for logging purposes).
+	// PrincipalSignature is the exploit owner's signature.
 	// This is extracted from the inner envelope before encryption.
 	PrincipalSignature []byte
+	// Hashes contains all SHA256 hashes calculated during encryption.
+	Hashes EncryptHashes
 }
 
 // EncryptPlugin encrypts a plugin and signs it with the principal's key, then encrypts
@@ -238,10 +253,39 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 		return nil, fmt.Errorf("failed to encrypt envelope to target: %w", err)
 	}
 
+	// Get principal public key for hash calculation
+	principalPubKey, err := req.PrincipalKeystore.PublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get principal public key: %w", err)
+	}
+
+	// Calculate hashes
+	exploitSigHash := sha256.Sum256(principalSig)
+	exploitSigHashHex := hex.EncodeToString(exploitSigHash[:])
+
+	exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(principalPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal exploit owner public key: %w", err)
+	}
+	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
+	exploitPubKeyHashHex := hex.EncodeToString(exploitPubKeyHash[:])
+
+	harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(req.HarnessPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal harness public key: %w", err)
+	}
+	harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
+	harnessPubKeyHashHex := hex.EncodeToString(harnessPubKeyHash[:])
+
 	return &EncryptPluginResult{
 		EncryptedData:      encryptedEnvelope,
 		PluginName:         pluginName,
 		PrincipalSignature: principalSig,
+		Hashes: EncryptHashes{
+			ExploitOwnerSignatureHash: exploitSigHashHex,
+			ExploitOwnerPublicKeyHash: exploitPubKeyHashHex,
+			HarnessPublicKeyHash:      harnessPubKeyHashHex,
+		},
 	}, nil
 }
 

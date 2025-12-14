@@ -3,9 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/pem"
 	"flag"
 	"fmt"
@@ -107,38 +105,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Calculate hash of exploit owner signature for logging
-	if len(result.PrincipalSignature) == 0 {
-		logger.Error("principal signature not available for logging")
-		os.Exit(1)
-	}
-	exploitSigHash := sha256.Sum256(result.PrincipalSignature)
-	exploitSigHashHex := hex.EncodeToString(exploitSigHash[:])
-
-	// Calculate hash of exploit owner public key for logging
-	exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(exploitPubKey)
-	if err != nil {
-		logger.Error("failed to marshal exploit owner public key", "error", err)
-		os.Exit(1)
-	}
-	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
-	exploitPubKeyHashHex := hex.EncodeToString(exploitPubKeyHash[:])
-
-	// Calculate hash of harness public key for logging
-	harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
-	if err != nil {
-		logger.Error("failed to marshal harness public key", "error", err)
-		os.Exit(1)
-	}
-	harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
-	harnessPubKeyHashHex := hex.EncodeToString(harnessPubKeyHash[:])
-
-	// Log storage details
+	// Log storage details using hashes from result
 	logger.Info("storage log",
 		"timestamp", time.Now().Format(time.RFC3339),
-		"exploit_owner_signature_hash_sha256", exploitSigHashHex,
-		"exploit_owner_public_key_hash_sha256", exploitPubKeyHashHex,
-		"harness_public_key_hash_sha256", harnessPubKeyHashHex,
+		"exploit_owner_signature_hash_sha256", result.Hashes.ExploitOwnerSignatureHash,
+		"exploit_owner_public_key_hash_sha256", result.Hashes.ExploitOwnerPublicKeyHash,
+		"harness_public_key_hash_sha256", result.Hashes.HarnessPublicKeyHash,
 	)
 
 	// Determine output path

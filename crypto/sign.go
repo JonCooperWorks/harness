@@ -2,7 +2,10 @@ package crypto
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +48,14 @@ type SignEncryptedPluginRequest struct {
 	Expiration *time.Time
 }
 
+// SignHashes contains all SHA256 hashes calculated during signing.
+type SignHashes struct {
+	// EncryptedPayloadHash is the SHA256 hash of the encrypted payload.
+	EncryptedPayloadHash string
+	// TargetPublicKeyHash is the SHA256 hash of the target's public key.
+	TargetPublicKeyHash string
+}
+
 // SignEncryptedPluginResult contains the signed and approved plugin data.
 //
 // The ApprovedData field contains the complete approved file format:
@@ -56,6 +67,8 @@ type SignEncryptedPluginResult struct {
 	// ExpirationTime is when the signature expires.
 	// Execution will fail if attempted after this time.
 	ExpirationTime time.Time
+	// Hashes contains all SHA256 hashes calculated during signing.
+	Hashes SignHashes
 }
 
 // SignEncryptedPlugin decrypts the encrypted envelope, verifies the exploit owner signature, and signs it with client arguments.
@@ -221,8 +234,29 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	binary.BigEndian.PutUint32(fileLengthBuf, uint32(len(output)))
 	copy(output[6:10], fileLengthBuf)
 
+	// Get target public key for hash calculation
+	targetPubKey, err := req.ClientKeystore.PublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get target public key: %w", err)
+	}
+
+	// Calculate hashes
+	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
+	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
+
+	targetPubKeyBytes, err := x509.MarshalPKIXPublicKey(targetPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal target public key: %w", err)
+	}
+	targetPubKeyHash := sha256.Sum256(targetPubKeyBytes)
+	targetPubKeyHashHex := hex.EncodeToString(targetPubKeyHash[:])
+
 	return &SignEncryptedPluginResult{
 		ApprovedData:   output,
 		ExpirationTime: expirationTime,
+		Hashes: SignHashes{
+			EncryptedPayloadHash: encryptedPayloadHashHex,
+			TargetPublicKeyHash:  targetPubKeyHashHex,
+		},
 	}, nil
 }

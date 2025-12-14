@@ -2,10 +2,7 @@ package main
 
 import (
 	"crypto/ed25519"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/pem"
 	"flag"
 	"fmt"
@@ -91,80 +88,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Verify client signature on arguments and decrypt
-	// VerifyAndDecrypt handles all parsing deterministically
-	result, err := po.VerifyAndDecrypt(fileData)
+
+	// Verify and decrypt with hash calculation
+	verifyResult, err := crypto.VerifyAndDecryptWithHashes(po, fileData, harnessPubKey, targetPubKey, exploitPubKey)
 	if err != nil {
 		logger.Error("failed to verify and decrypt", "error", err)
 		os.Exit(1)
 	}
 
-	// Calculate hash of target signature
-	targetSigHash := sha256.Sum256(result.ClientSignature)
-	targetSigHashHex := hex.EncodeToString(targetSigHash[:])
-
-	// Calculate hash of target public key
-	targetPubKeyBytes, err := x509.MarshalPKIXPublicKey(targetPubKey)
-	if err != nil {
-		logger.Error("failed to marshal target public key", "error", err)
-		os.Exit(1)
-	}
-	targetPubKeyHash := sha256.Sum256(targetPubKeyBytes)
-	targetPubKeyHashHex := hex.EncodeToString(targetPubKeyHash[:])
-
-	// Calculate hash of harness public key
-	harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
-	if err != nil {
-		logger.Error("failed to marshal harness public key", "error", err)
-		os.Exit(1)
-	}
-	harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
-	harnessPubKeyHashHex := hex.EncodeToString(harnessPubKeyHash[:])
-
-	// Calculate hash of exploit owner signature
-	exploitSigHash := sha256.Sum256(result.PrincipalSignature)
-	exploitSigHashHex := hex.EncodeToString(exploitSigHash[:])
-
-	// Calculate hash of exploit owner public key
-	exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(exploitPubKey)
-	if err != nil {
-		logger.Error("failed to marshal exploit owner public key", "error", err)
-		os.Exit(1)
-	}
-	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
-	exploitPubKeyHashHex := hex.EncodeToString(exploitPubKeyHash[:])
-
-	// Calculate encrypted payload hash for logging
-	// Extract encrypted payload: skip header(10) + principal_sig_len(4) + principal_sig, then read metadata_len(4) + metadata + encrypted data
-	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
-	if len(fileData) < headerSize+4 {
-		logger.Error("file too short", "size", len(fileData), "min_size", headerSize+4)
-		os.Exit(1)
-	}
-	principalSigLen := int(binary.BigEndian.Uint32(fileData[headerSize : headerSize+4]))
-	if len(fileData) < headerSize+4+principalSigLen+4 {
-		logger.Error("file too short", "size", len(fileData), "min_size", headerSize+4+principalSigLen+4)
-		os.Exit(1)
-	}
-	encryptedPayloadStart := headerSize + 4 + principalSigLen
-	encryptedPayloadEnd := len(fileData) - 4 - 60 - 8 - 4 // Approximate: client_sig_len - min_sig - expiration - args_len
-	if encryptedPayloadEnd <= encryptedPayloadStart {
-		encryptedPayloadEnd = len(fileData)
-	}
-	encryptedPayload := fileData[encryptedPayloadStart:encryptedPayloadEnd]
-	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
-	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
-
-	// Log verification details
+	// Log verification details using hashes from result
 	logger.Info("verification log",
 		"timestamp", time.Now().Format(time.RFC3339),
-		"encrypted_payload_hash_sha256", encryptedPayloadHashHex,
-		"exploit_owner_signature_hash_sha256", exploitSigHashHex,
-		"exploit_owner_public_key_hash_sha256", exploitPubKeyHashHex,
-		"target_signature_hash_sha256", targetSigHashHex,
-		"target_public_key_hash_sha256", targetPubKeyHashHex,
-		"harness_public_key_hash_sha256", harnessPubKeyHashHex,
+		"encrypted_payload_hash_sha256", verifyResult.Hashes.EncryptedPayloadHash,
+		"exploit_owner_signature_hash_sha256", verifyResult.Hashes.ExploitOwnerSignatureHash,
+		"exploit_owner_public_key_hash_sha256", verifyResult.Hashes.ExploitOwnerPublicKeyHash,
+		"target_signature_hash_sha256", verifyResult.Hashes.TargetSignatureHash,
+		"target_public_key_hash_sha256", verifyResult.Hashes.TargetPublicKeyHash,
+		"harness_public_key_hash_sha256", verifyResult.Hashes.HarnessPublicKeyHash,
 	)
+
+	result := verifyResult.DecryptedResult
 
 	fmt.Printf("✓ Target signature on arguments verified successfully\n")
 	fmt.Printf("✓ Plugin decrypted successfully\n")

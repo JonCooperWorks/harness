@@ -77,13 +77,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Get exploit owner public key for logging
-	exploitPubKey, err := exploitKs.PublicKey()
-	if err != nil {
-		logger.Error("failed to get exploit owner public key", "error", err, "key_id", *exploitKeystoreKey)
-		os.Exit(1)
-	}
-
 	// Read plugin file
 	fileData, err := os.ReadFile(*pluginFile)
 	if err != nil {
@@ -117,7 +110,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Extract principal signature from inner envelope for logging
+		// Extract principal signature from inner envelope
 		// Format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig]...
 		const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
 		if len(innerEnvelope) < headerSize+4 {
@@ -138,11 +131,42 @@ func main() {
 		// So we'll use a placeholder - the actual name will be available after target signs
 		pluginName = "stored-plugin"
 
-		// Create result with re-encrypted envelope
+		// Get principal public key for hash calculation
+		principalPubKey, err := exploitKs.PublicKey()
+		if err != nil {
+			logger.Error("failed to get principal public key", "error", err)
+			os.Exit(1)
+		}
+
+		// Calculate hashes for stored file re-encryption
+		exploitSigHash := sha256.Sum256(principalSignature)
+		exploitSigHashHex := hex.EncodeToString(exploitSigHash[:])
+
+		exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(principalPubKey)
+		if err != nil {
+			logger.Error("failed to marshal exploit owner public key", "error", err)
+			os.Exit(1)
+		}
+		exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
+		exploitPubKeyHashHex := hex.EncodeToString(exploitPubKeyHash[:])
+
+		harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
+		if err != nil {
+			logger.Error("failed to marshal harness public key", "error", err)
+			os.Exit(1)
+		}
+		harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
+		harnessPubKeyHashHex := hex.EncodeToString(harnessPubKeyHash[:])
+
 		result = &crypto.EncryptPluginResult{
 			EncryptedData:      encryptedEnvelope,
 			PluginName:         pluginName,
 			PrincipalSignature: principalSignature,
+			Hashes: crypto.EncryptHashes{
+				ExploitOwnerSignatureHash: exploitSigHashHex,
+				ExploitOwnerPublicKeyHash: exploitPubKeyHashHex,
+				HarnessPublicKeyHash:      harnessPubKeyHashHex,
+			},
 		}
 
 		logger.Info("detected stored file", "file", *pluginFile, "re_encrypted_to", "target")
@@ -180,39 +204,12 @@ func main() {
 		}
 	}
 
-	// Calculate hash of exploit owner signature for logging
-	// The signature is extracted from the inner envelope before encryption
-	if len(result.PrincipalSignature) == 0 {
-		logger.Error("principal signature not available for logging")
-		os.Exit(1)
-	}
-	exploitSigHash := sha256.Sum256(result.PrincipalSignature)
-	exploitSigHashHex := hex.EncodeToString(exploitSigHash[:])
-
-	// Calculate hash of exploit owner public key for logging
-	exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(exploitPubKey)
-	if err != nil {
-		logger.Error("failed to marshal exploit owner public key", "error", err)
-		os.Exit(1)
-	}
-	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
-	exploitPubKeyHashHex := hex.EncodeToString(exploitPubKeyHash[:])
-
-	// Calculate hash of harness public key for logging
-	harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
-	if err != nil {
-		logger.Error("failed to marshal harness public key", "error", err)
-		os.Exit(1)
-	}
-	harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
-	harnessPubKeyHashHex := hex.EncodeToString(harnessPubKeyHash[:])
-
-	// Log encryption details
+	// Log encryption details using hashes from result
 	logger.Info("encryption log",
 		"timestamp", time.Now().Format(time.RFC3339),
-		"exploit_owner_signature_hash_sha256", exploitSigHashHex,
-		"exploit_owner_public_key_hash_sha256", exploitPubKeyHashHex,
-		"harness_public_key_hash_sha256", harnessPubKeyHashHex,
+		"exploit_owner_signature_hash_sha256", result.Hashes.ExploitOwnerSignatureHash,
+		"exploit_owner_public_key_hash_sha256", result.Hashes.ExploitOwnerPublicKeyHash,
+		"harness_public_key_hash_sha256", result.Hashes.HarnessPublicKeyHash,
 	)
 
 	output := result.EncryptedData

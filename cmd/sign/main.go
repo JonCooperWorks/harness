@@ -2,11 +2,7 @@ package main
 
 import (
 	"crypto/ed25519"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/binary"
-	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"flag"
 	"fmt"
@@ -110,60 +106,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Extract encrypted payload hash for logging
-	// Format: [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data][client_sig_len:4][client_sig][expiration:8][args_len:4][encrypted_args]
-	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
-	if len(result.ApprovedData) < headerSize+4 {
-		logger.Error("approved data too short", "size", len(result.ApprovedData), "min_size", headerSize+4)
-		os.Exit(1)
-	}
-	principalSigLen := int(binary.BigEndian.Uint32(result.ApprovedData[headerSize : headerSize+4]))
-	if len(result.ApprovedData) < headerSize+4+principalSigLen+4 {
-		logger.Error("approved data too short", "size", len(result.ApprovedData), "min_size", headerSize+4+principalSigLen+4)
-		os.Exit(1)
-	}
-	encryptedPayloadStart := headerSize + 4 + principalSigLen
-	// Find end of encrypted payload (before client signature)
-	// We need to read metadata to find the exact end
-	metadataLen := int(binary.BigEndian.Uint32(result.ApprovedData[encryptedPayloadStart : encryptedPayloadStart+4]))
-	if len(result.ApprovedData) < encryptedPayloadStart+4+metadataLen {
-		logger.Error("approved data too short for metadata", "size", len(result.ApprovedData), "min_size", encryptedPayloadStart+4+metadataLen)
-		os.Exit(1)
-	}
-	metadataStart := encryptedPayloadStart + 4
-	metadataEnd := metadataStart + metadataLen
-	var metadataStruct struct {
-		SymmetricKeyLen int `json:"symmetric_key_len"`
-		PluginDataLen   int `json:"plugin_data_len"`
-	}
-	if err := json.Unmarshal(result.ApprovedData[metadataStart:metadataEnd], &metadataStruct); err != nil {
-		logger.Error("failed to parse metadata", "error", err)
-		os.Exit(1)
-	}
-	encryptedPayloadEnd := metadataEnd + metadataStruct.SymmetricKeyLen + metadataStruct.PluginDataLen
-	encryptedPayload := result.ApprovedData[encryptedPayloadStart:encryptedPayloadEnd]
-	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
-	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
-
-	// Get target public key for logging
-	targetPubKey, err := targetKs.PublicKey()
-	if err != nil {
-		logger.Error("failed to get target public key", "error", err, "key_id", *targetKeystoreKey)
-		os.Exit(1)
-	}
-	targetPubKeyBytes, err := x509.MarshalPKIXPublicKey(targetPubKey)
-	if err != nil {
-		logger.Error("failed to marshal target public key", "error", err)
-		os.Exit(1)
-	}
-	targetPubKeyHash := sha256.Sum256(targetPubKeyBytes)
-	targetPubKeyHashHex := hex.EncodeToString(targetPubKeyHash[:])
-
-	// Log signing details
+	// Log signing details using hashes from result
 	logger.Info("signing log",
 		"timestamp", time.Now().Format(time.RFC3339),
-		"encrypted_payload_hash_sha256", encryptedPayloadHashHex,
-		"target_public_key_hash_sha256", targetPubKeyHashHex,
+		"encrypted_payload_hash_sha256", result.Hashes.EncryptedPayloadHash,
+		"target_public_key_hash_sha256", result.Hashes.TargetPublicKeyHash,
 	)
 
 	output := result.ApprovedData

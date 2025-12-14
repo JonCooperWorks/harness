@@ -4,7 +4,10 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +33,30 @@ type DecryptedResult struct {
 	// PrincipalSignature is the principal's signature from the approved file.
 	// This signature covers the encrypted payload.
 	PrincipalSignature []byte
+}
+
+// VerifyHashes contains all SHA256 hashes calculated during verification.
+type VerifyHashes struct {
+	// EncryptedPayloadHash is the SHA256 hash of the encrypted payload.
+	EncryptedPayloadHash string
+	// ExploitOwnerSignatureHash is the SHA256 hash of the exploit owner's signature.
+	ExploitOwnerSignatureHash string
+	// ExploitOwnerPublicKeyHash is the SHA256 hash of the exploit owner's public key.
+	ExploitOwnerPublicKeyHash string
+	// TargetSignatureHash is the SHA256 hash of the target's signature.
+	TargetSignatureHash string
+	// TargetPublicKeyHash is the SHA256 hash of the target's public key.
+	TargetPublicKeyHash string
+	// HarnessPublicKeyHash is the SHA256 hash of the harness (pentester's) public key.
+	HarnessPublicKeyHash string
+}
+
+// VerifyAndDecryptResult contains the decrypted result and all calculated hashes.
+type VerifyAndDecryptResult struct {
+	// DecryptedResult contains the decrypted payload and signatures.
+	*DecryptedResult
+	// Hashes contains all SHA256 hashes calculated during verification.
+	Hashes VerifyHashes
 }
 
 // PresidentialOrder is an interface for verifying signatures and decrypting payloads.
@@ -89,6 +116,79 @@ func NewPresidentialOrderFromKeystore(harnessKeystore keystore.Keystore, clientP
 		clientPubKey:    clientPubKey,
 		principalPubKey: principalPubKey,
 		keystore:        harnessKeystore,
+	}, nil
+}
+
+// VerifyAndDecryptWithHashes verifies signatures, decrypts the payload, and returns hashes.
+//
+// This is a convenience wrapper around PresidentialOrder.VerifyAndDecrypt that also
+// calculates and returns all relevant SHA256 hashes for audit logging.
+func VerifyAndDecryptWithHashes(po PresidentialOrder, fileData []byte, harnessPubKey ed25519.PublicKey, targetPubKey ed25519.PublicKey, exploitPubKey ed25519.PublicKey) (*VerifyAndDecryptResult, error) {
+	result, err := po.VerifyAndDecrypt(fileData)
+	if err != nil {
+		return nil, err
+	}
+
+	// Calculate hash of target signature
+	targetSigHash := sha256.Sum256(result.ClientSignature)
+	targetSigHashHex := hex.EncodeToString(targetSigHash[:])
+
+	// Calculate hash of target public key
+	targetPubKeyBytes, err := x509.MarshalPKIXPublicKey(targetPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal target public key: %w", err)
+	}
+	targetPubKeyHash := sha256.Sum256(targetPubKeyBytes)
+	targetPubKeyHashHex := hex.EncodeToString(targetPubKeyHash[:])
+
+	// Calculate hash of harness public key
+	harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal harness public key: %w", err)
+	}
+	harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
+	harnessPubKeyHashHex := hex.EncodeToString(harnessPubKeyHash[:])
+
+	// Calculate hash of exploit owner signature
+	exploitSigHash := sha256.Sum256(result.PrincipalSignature)
+	exploitSigHashHex := hex.EncodeToString(exploitSigHash[:])
+
+	// Calculate hash of exploit owner public key
+	exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(exploitPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal exploit owner public key: %w", err)
+	}
+	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
+	exploitPubKeyHashHex := hex.EncodeToString(exploitPubKeyHash[:])
+
+	// Calculate encrypted payload hash
+	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
+	if len(fileData) < headerSize+4 {
+		return nil, errors.New("file too short")
+	}
+	principalSigLen := int(binary.BigEndian.Uint32(fileData[headerSize : headerSize+4]))
+	if len(fileData) < headerSize+4+principalSigLen+4 {
+		return nil, errors.New("file too short")
+	}
+	encryptedPayloadStart := headerSize + 4 + principalSigLen
+	encryptedPayloadEnd := len(fileData) - 4 - 60 - 8 - 4 // Approximate: client_sig_len - min_sig - expiration - args_len
+	if encryptedPayloadEnd <= encryptedPayloadStart {
+		encryptedPayloadEnd = len(fileData)
+	}
+	encryptedPayload := fileData[encryptedPayloadStart:encryptedPayloadEnd]
+	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
+	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
+
+	return &VerifyAndDecryptResult{
+		DecryptedResult: result,
+		Hashes: VerifyHashes{
+			EncryptedPayloadHash:      encryptedPayloadHashHex,
+			ExploitOwnerSignatureHash: exploitSigHashHex,
+			ExploitOwnerPublicKeyHash: exploitPubKeyHashHex,
+			TargetSignatureHash:       targetSigHashHex,
+			TargetPublicKeyHash:       targetPubKeyHashHex,
+			HarnessPublicKeyHash:      harnessPubKeyHashHex,
+		},
 	}, nil
 }
 
