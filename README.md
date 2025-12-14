@@ -23,12 +23,22 @@ Cryptographically secure framework for storing, transporting, approving, and exe
 Three parties, each with limited capabilities:
 
 1. **Exploit Owner** — Encrypts payload, signs digest. Cannot authorize execution.
-2. **Target** — Decrypts inner envelope, verifies EO signature, signs args + expiration. Cannot decrypt payload.
+2. **Target** — Decrypts outer envelope (E) to get inner envelope (E_inner), verifies EO signature, signs args + expiration. Cannot decrypt the encrypted payload itself (requires Harness key).
 3. **Harness** — Verifies both signatures, checks expiration, decrypts and executes in WASM.
 
 **Onion encryption:**
-- Inner layer encrypted to Target
-- Outer layer encrypted to Harness
+- Inner layer encrypted to Harness (symmetric key + payload)
+- Outer layer encrypted to Target (inner envelope)
+
+### Visibility by Party
+
+Each party has limited visibility into the execution envelope:
+
+- **Exploit Owner:** Can see plaintext payload during encryption phase. Signs the encrypted payload hash (commitment to the encrypted executable). Cannot decrypt envelopes or authorize execution.
+
+- **Target:** Can decrypt the outer envelope (E) to access the inner envelope (E_inner). Sees the encrypted payload (metadata + encrypted symmetric key + encrypted plugin data) but **cannot decrypt the executable itself** — the symmetric key is encrypted to Harness's public key. Signs a commitment to: encrypted executable + execution arguments + expiration timestamp.
+
+- **Harness:** Receives the approved package (A) containing E_inner + Target signature + expiration + encrypted args. Verifies both signatures, checks expiration, then decrypts the symmetric key, payload, and arguments. Only Harness can decrypt and execute the payload.
 
 ---
 
@@ -241,16 +251,19 @@ The registry system automatically routes payloads to the correct loader based on
 ### Envelope Structure
 
 ```
-EO_Signature = Sign_EO(SHA256("harness:payload-signature" || payload))
+EO_Signature = Sign_EO(SHA256("harness:payload-signature" || encrypted_payload))
+where encrypted_payload = [metadata][encrypted_symmetric_key][encrypted_plugin_data]
 
-Inner = Encrypt_X25519(TargetPub, payload || EO_Signature)
+Inner = Encrypt_X25519(TargetPub, [magic][version][flags][file_length][EO_Signature][encrypted_payload])
 
 Target_Signature = Sign_Target(
-    SHA256("harness:client-signature" || Hash(Inner) || args || expiration)
+    SHA256("harness:client-signature" || encrypted_payload || expiration || encrypted_args)
 )
 
-Outer = Encrypt_X25519(HarnessPub, Inner || Target_Signature || args || expiration)
+Approved Package (A) = Inner || Target_Signature || expiration || encrypted_args
 ```
+
+**Note:** Target signs a commitment to the encrypted executable (not the plaintext), plus the execution arguments and expiration. The Target cannot decrypt the executable itself — only Harness can decrypt using its private key.
 
 ### Cryptographic Suite
 
@@ -267,12 +280,12 @@ Keys remain in OS keystores or HSMs.
 
 | Threat | Mitigation |
 |--------|------------|
-| Unauthorized execution | Target signature on args + expiration |
+| Unauthorized execution | Target signature on encrypted payload + args + expiration |
 | Payload disclosure | AES-256-GCM; keys in secure keystore |
 | Chain-of-custody | EO + Target signatures with KeyIDs |
 | Stale approvals | Signed expiration timestamp |
 | Tampering | Signatures over SHA-256(context‖message) |
-| Replay (within window) | Allowed; expiration limits risk |
+| Replay (within window) | Allowed until expiration; callers can implement replay prevention using returned hashes |
 
 **Out of scope:**
 - Compromised Target/Harness hosts
@@ -329,5 +342,14 @@ The CLI tools log these hashes to stderr in structured JSON format, including ti
 - Keys never exist outside secure storage
 - WASM provides cross-platform consistency, **not sandboxing** — plugins can access the network
 - Run Harness on isolated, monitored systems appropriate for executing untrusted code
-- Replay allowed but expiration-bound
+- **Replay behavior:** Replays of approved packages are allowed within the expiration window. Callers can implement replay prevention by tracking execution of specific approved packages using the returned hashes:
+  - `encrypted_payload_hash_sha256` — identifies the encrypted payload
+  - `target_signature_hash_sha256` — identifies the Target's approval
+  - `exploit_owner_signature_hash_sha256` — identifies the Exploit Owner's approval
 - All cryptographic actions logged with KeyIDs
+
+### KeyID Semantics
+
+`KeyID` is a stable identifier (string) used for logging, rotation tracking, and chain-of-custody. It is **not** a cryptographic identifier — the cryptographic identity is the public key itself. KeyID is bound to a keystore entry and can be derived from config, file names, fingerprints, or any other stable source. Verifiers map KeyID to public keys through out-of-band key distribution (e.g., public key files, key servers, or configuration).
+
+---
