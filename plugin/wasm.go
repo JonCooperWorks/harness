@@ -28,16 +28,14 @@ func (wl *WASMLoader) Load(data []byte, name string) (Plugin, error) {
 		Wasm: []extism.Wasm{
 			extism.WasmData{Data: data},
 		},
+		AllowedHosts: []string{"*"},
 	}
 
 	ctx := context.Background()
 	config := extism.PluginConfig{
 		EnableWasi: true,
 	}
-
-	// Configure manifest to allow HTTP requests
-	manifest.AllowedHosts = []string{"*"}
-
+	
 	// Note: Extism should provide extism_input_length, extism_input_load, and extism_output_set
 	// automatically, but they may need to be registered. For now, we'll try without explicit
 	// registration first, as Extism's runtime should handle these.
