@@ -186,7 +186,6 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 	}
 
 	// Build encrypted payload: [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
-	// This is what the principal signature will sign
 	var encryptedPayload []byte
 	metadataLenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(metadataLenBuf, uint32(len(metadataJSON)))
@@ -195,30 +194,39 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 	encryptedPayload = append(encryptedPayload, encryptedSymmetricKey...)
 	encryptedPayload = append(encryptedPayload, encryptedPluginData...)
 
-	// Sign encrypted payload with principal key using the EO signature context
-	// The context provides domain separation - EO signatures use ContextPayloadSignature
-	principalSignature, err := req.PrincipalKeystore.Sign(encryptedPayload, hceepcrypto.ContextPayloadSignature)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign encrypted payload: %w", err)
-	}
-
-	// Build encrypted file structure with header and principal signature:
+	// Build encrypted file structure with header:
 	// [magic:4][version:1][flags:1][file_length:4][principal_sig_len:4][principal_sig][metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 	var output []byte
 
 	// Write magic bytes "HARN" (0x48 0x41 0x52 0x4E)
 	output = append(output, []byte("HARN")...)
 
-	// Write version (1 byte, version 1)
-	output = append(output, byte(1))
+	// Write version (1 byte, version 2 - includes version/flags in signature)
+	version := byte(2)
+	output = append(output, version)
 
 	// Write flags (1 byte, currently 0 - reserved for future use)
-	output = append(output, byte(0))
+	flags := byte(0)
+	output = append(output, flags)
 
 	// Write file length placeholder (4 bytes, will be updated by SignEncryptedPlugin)
 	fileLengthBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(fileLengthBuf, 0) // Placeholder
 	output = append(output, fileLengthBuf...)
+
+	// Build data to sign: version 2 includes version and flags in signature
+	// Version 2: ContextPayloadSignature || version || flags || encrypted_payload
+	var dataToSign []byte
+	dataToSign = append(dataToSign, version)
+	dataToSign = append(dataToSign, flags)
+	dataToSign = append(dataToSign, encryptedPayload...)
+
+	// Sign with principal key using the EO signature context
+	// The context provides domain separation - EO signatures use ContextPayloadSignature
+	principalSignature, err := req.PrincipalKeystore.Sign(dataToSign, hceepcrypto.ContextPayloadSignature)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign encrypted payload: %w", err)
+	}
 
 	// Write principal signature length
 	principalSigLenBuf := make([]byte, 4)

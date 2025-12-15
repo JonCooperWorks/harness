@@ -82,6 +82,13 @@ type PresidentialOrder interface {
 	VerifyAndDecrypt(ciphertextAndMetadata []byte) (*DecryptedResult, error)
 }
 
+// Max size limits for encrypted blobs (DoS protection)
+const (
+	MaxEncryptedSymmetricKeySize = 1024              // Reasonable for X25519+AES-GCM envelope
+	MaxEncryptedPluginDataSize   = 100 * 1024 * 1024 // 100MB
+	MaxEncryptedArgsSize         = 1 * 1024 * 1024   // 1MB
+)
+
 // PresidentialOrderImpl implements the PresidentialOrder interface
 type PresidentialOrderImpl struct {
 	clientPubKey    ed25519.PublicKey // Client's public key (for verifying argument signature)
@@ -161,7 +168,8 @@ func VerifyAndDecryptWithHashes(po PresidentialOrder, fileData []byte, harnessPu
 	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
 	exploitPubKeyHashHex := hex.EncodeToString(exploitPubKeyHash[:])
 
-	// Calculate encrypted payload hash
+	// Calculate encrypted payload hash deterministically by parsing offsets
+	// This matches the exact calculation used in VerifyAndDecrypt
 	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
 	if len(fileData) < headerSize+4 {
 		return nil, errors.New("file too short")
@@ -170,10 +178,44 @@ func VerifyAndDecryptWithHashes(po PresidentialOrder, fileData []byte, harnessPu
 	if len(fileData) < headerSize+4+principalSigLen+4 {
 		return nil, errors.New("file too short")
 	}
-	encryptedPayloadStart := headerSize + 4 + principalSigLen
-	encryptedPayloadEnd := len(fileData) - 4 - 60 - 8 - 4 // Approximate: client_sig_len - min_sig - expiration - args_len
-	if encryptedPayloadEnd <= encryptedPayloadStart {
-		encryptedPayloadEnd = len(fileData)
+	pos := headerSize + 4 + principalSigLen // Position after principal signature
+
+	// Read metadata length
+	if pos+4 > len(fileData) {
+		return nil, errors.New("file too short for metadata length")
+	}
+	metadataLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
+	if metadataLen > 10000 {
+		return nil, fmt.Errorf("metadata length %d exceeds maximum allowed size %d", metadataLen, 10000)
+	}
+	if metadataLen < 0 {
+		return nil, fmt.Errorf("invalid metadata length: %d", metadataLen)
+	}
+	pos += 4
+
+	// Read metadata
+	if pos+metadataLen > len(fileData) {
+		return nil, errors.New("file too short for metadata")
+	}
+	metadata := fileData[pos : pos+metadataLen]
+	pos += metadataLen
+
+	// Parse metadata to get encrypted symmetric key length and plugin data length
+	var metadataStruct struct {
+		SymmetricKeyLen int    `json:"symmetric_key_len"`
+		PluginDataLen   int    `json:"plugin_data_len"`
+		Algorithm       string `json:"algorithm"`
+	}
+	if err := json.Unmarshal(metadata, &metadataStruct); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
+	}
+
+	// Calculate encrypted payload deterministically
+	// Encrypted payload = [metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+	encryptedPayloadStart := pos - 4 - metadataLen // Start at metadata_len
+	encryptedPayloadEnd := pos + metadataStruct.SymmetricKeyLen + metadataStruct.PluginDataLen
+	if encryptedPayloadEnd > len(fileData) {
+		return nil, errors.New("file too short for encrypted payload")
 	}
 	encryptedPayload := fileData[encryptedPayloadStart:encryptedPayloadEnd]
 	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
@@ -233,9 +275,10 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	}
 	pos += 4
 
-	// Read version (must be 1)
-	if fileData[pos] != 1 {
-		return nil, fmt.Errorf("unsupported file format version: %d (expected 1)", fileData[pos])
+	// Read version (supports 1 and 2)
+	version := fileData[pos]
+	if version != 1 && version != 2 {
+		return nil, fmt.Errorf("unsupported file format version: %d (expected 1 or 2)", version)
 	}
 	pos++
 
@@ -302,6 +345,20 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
 
+	// Enforce max size limits (DoS protection)
+	if metadataStruct.SymmetricKeyLen > MaxEncryptedSymmetricKeySize {
+		return nil, fmt.Errorf("encrypted symmetric key size %d exceeds maximum %d", metadataStruct.SymmetricKeyLen, MaxEncryptedSymmetricKeySize)
+	}
+	if metadataStruct.PluginDataLen > MaxEncryptedPluginDataSize {
+		return nil, fmt.Errorf("encrypted plugin data size %d exceeds maximum %d", metadataStruct.PluginDataLen, MaxEncryptedPluginDataSize)
+	}
+	if metadataStruct.SymmetricKeyLen < 0 {
+		return nil, fmt.Errorf("invalid encrypted symmetric key size: %d", metadataStruct.SymmetricKeyLen)
+	}
+	if metadataStruct.PluginDataLen < 0 {
+		return nil, fmt.Errorf("invalid encrypted plugin data size: %d", metadataStruct.PluginDataLen)
+	}
+
 	// Calculate encrypted payload for signature verification
 	// Encrypted payload = [metadata_len:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 	encryptedPayloadStart := pos - 4 - metadataLen // Start at metadata_len
@@ -313,7 +370,17 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 
 	// Verify principal signature BEFORE decryption
 	// EO signatures use ContextPayloadSignature for domain separation
-	if err := po.keystore.Verify(po.principalPubKey, encryptedPayload, principalSignature, hceepcrypto.ContextPayloadSignature); err != nil {
+	// Version 1: ContextPayloadSignature || encrypted_payload
+	// Version 2: ContextPayloadSignature || version || flags || encrypted_payload
+	var principalDataToVerify []byte
+	if version == 2 {
+		principalDataToVerify = append(principalDataToVerify, version)
+		principalDataToVerify = append(principalDataToVerify, flags)
+		principalDataToVerify = append(principalDataToVerify, encryptedPayload...)
+	} else {
+		principalDataToVerify = encryptedPayload
+	}
+	if err := po.keystore.Verify(po.principalPubKey, principalDataToVerify, principalSignature, hceepcrypto.ContextPayloadSignature); err != nil {
 		return nil, errors.New("principal signature verification failed (signature must cover encrypted payload with ContextPayloadSignature)")
 	}
 
@@ -368,6 +435,14 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	encryptedArgsLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
 	pos += 4
 
+	// Enforce max size limit for encrypted args (DoS protection)
+	if encryptedArgsLen > MaxEncryptedArgsSize {
+		return nil, fmt.Errorf("encrypted args size %d exceeds maximum %d", encryptedArgsLen, MaxEncryptedArgsSize)
+	}
+	if encryptedArgsLen < 0 {
+		return nil, fmt.Errorf("invalid encrypted args size: %d", encryptedArgsLen)
+	}
+
 	// Read encrypted args
 	if pos+encryptedArgsLen > len(fileData) {
 		return nil, errors.New("file too short for encrypted args")
@@ -382,10 +457,18 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 
 	// Verify client signature: Signature covers encrypted_payload + expiration (8 bytes) + encrypted_args
 	// Client signatures use ContextClientSignature for domain separation
-	dataToVerify := make([]byte, len(encryptedPayload)+8+len(encryptedArgs))
-	copy(dataToVerify[0:len(encryptedPayload)], encryptedPayload)
-	binary.BigEndian.PutUint64(dataToVerify[len(encryptedPayload):len(encryptedPayload)+8], uint64(expirationUnix))
-	copy(dataToVerify[len(encryptedPayload)+8:], encryptedArgs)
+	// Version 1: ContextClientSignature || encrypted_payload || expiration || encrypted_args
+	// Version 2: ContextClientSignature || version || flags || encrypted_payload || expiration || encrypted_args
+	var dataToVerify []byte
+	if version == 2 {
+		dataToVerify = append(dataToVerify, version)
+		dataToVerify = append(dataToVerify, flags)
+	}
+	dataToVerify = append(dataToVerify, encryptedPayload...)
+	expirationBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(expirationBuf, uint64(expirationUnix))
+	dataToVerify = append(dataToVerify, expirationBuf...)
+	dataToVerify = append(dataToVerify, encryptedArgs...)
 
 	if err := po.keystore.Verify(po.clientPubKey, dataToVerify, clientSignature, hceepcrypto.ContextClientSignature); err != nil {
 		return nil, errors.New("client signature verification failed (signature must cover encrypted payload, expiration, and arguments with ContextClientSignature)")

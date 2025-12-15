@@ -147,14 +147,17 @@ Given **P** and target public key `pk_T`:
    - HKDF-SHA256  
    - AES-256-GCM
 4. Construct metadata.
-5. Compute payload hash:
+5. Build encrypted payload:
    ```
-   H_payload = SHA256(metadata || Enc_K_sym || Enc_P)
+   encrypted_payload = [metadata_length:4][metadata][Enc_K_sym][Enc_P]
    ```
-6. EO signs:
+6. EO signs with domain-separated context:
+   - **Version 1 (legacy):** `digest = SHA-256(ContextPayloadSignature || encrypted_payload)`
+   - **Version 2 (recommended):** `digest = SHA-256(ContextPayloadSignature || version || flags || encrypted_payload)`
    ```
-   sig_EO = Ed25519_sign(sk_EO, H_payload)
+   sig_EO = Ed25519_sign(sk_EO, digest)
    ```
+   Where `ContextPayloadSignature = "harness-payload-signature-v1"` provides domain separation. Version 2 binds version and flags to the signature, preventing header interpretation attacks.
 7. Construct inner envelope  
    ```
    E_inner = (magic || version || flags || file_length || sig_EO || metadata || Enc_K_sym || Enc_P)
@@ -170,22 +173,26 @@ Given **P** and target public key `pk_T`:
 Given encrypted envelope **E** and Exploit Owner public key `pk_EO`:
 
 1. Target decrypts **E** using `sk_T` → `E_inner`.
-2. Extract `sig_EO` and `H_payload` from `E_inner`.
+2. Extract `sig_EO` and `encrypted_payload` from `E_inner`.
 3. **Verify Exploit Owner signature** (ensures chain-of-custody):
    ```
-   Ed25519_verify(pk_EO, H_payload, sig_EO)
+   digest = SHA-256(ContextPayloadSignature || encrypted_payload)
+   Ed25519_verify(pk_EO, digest, sig_EO)
    ```
-   If verification fails, reject the envelope (payload not signed by expected Exploit Owner).
+   Where `ContextPayloadSignature = "harness-payload-signature-v1"`. If verification fails, reject the envelope (payload not signed by expected Exploit Owner).
 4. Encrypt arguments for Harness → `Enc_args` (X25519 + AES-256-GCM).
 5. Choose expiration `exp` (Unix seconds).
-6. Compute:
+6. Build data to sign:
    ```
-   H_target = SHA256(H_payload || exp || Enc_args)
+   data_to_sign = encrypted_payload || exp || Enc_args
    ```
-7. T signs:
+7. T signs with domain-separated context:
+   - **Version 1 (legacy):** `digest = SHA-256(ContextClientSignature || data_to_sign)`
+   - **Version 2 (recommended):** `digest = SHA-256(ContextClientSignature || version || flags || data_to_sign)`
    ```
-   sig_T = Ed25519_sign(sk_T, H_target)
+   sig_T = Ed25519_sign(sk_T, digest)
    ```
+   Where `ContextClientSignature = "harness-client-signature-v1"` provides domain separation. Version 2 binds version and flags to the signature, preventing header interpretation attacks.
 8. Append to `E_inner` → produce approved package **A**.
 
 ### 5.3. Harness Execution Phase
@@ -222,7 +229,7 @@ The envelope **E** is encrypted to the target's public key. Format (encrypted, i
 | Field                 | Size     | Description                              |
 |-----------------------|----------|------------------------------------------|
 | magic                 | 4        | Literal "HARN"                           |
-| version               | 1        | MUST be 1                                |
+| version               | 1        | Version: 1 (legacy) or 2 (with version/flags binding) |
 | flags                 | 1        | Reserved                                 |
 | file_length           | 4        | Total size                               |
 | exploit_owner_sig_len | 4        | MUST be 64                               |

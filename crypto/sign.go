@@ -143,6 +143,11 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt arguments: %w", err)
 	}
+	
+	// Enforce max size limit for encrypted args (DoS protection)
+	if len(encryptedArgs) > MaxEncryptedArgsSize {
+		return nil, fmt.Errorf("encrypted args size %d exceeds maximum %d", len(encryptedArgs), MaxEncryptedArgsSize)
+	}
 
 	// Calculate expiration timestamp (Unix timestamp in seconds)
 	var expirationTime time.Time
@@ -161,8 +166,10 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	if string(encryptedData[0:4]) != "HARN" {
 		return nil, errors.New("invalid magic bytes: not a harness file")
 	}
-	if encryptedData[4] != 1 {
-		return nil, fmt.Errorf("unsupported file format version: %d (expected 1)", encryptedData[4])
+	version := encryptedData[4]
+	flags := encryptedData[5]
+	if version != 1 && version != 2 {
+		return nil, fmt.Errorf("unsupported file format version: %d (expected 1 or 2)", version)
 	}
 
 	// Extract principal signature and encrypted payload
@@ -185,16 +192,34 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 
 	// Verify principal (exploit owner) signature BEFORE signing (ensures chain-of-custody)
 	// EO signatures use ContextPayloadSignature for domain separation
-	if err := req.ClientKeystore.Verify(req.PrincipalPubKey, encryptedPayload, principalSignature, hceepcrypto.ContextPayloadSignature); err != nil {
+	// Version 1: ContextPayloadSignature || encrypted_payload
+	// Version 2: ContextPayloadSignature || version || flags || encrypted_payload
+	var principalDataToVerify []byte
+	if version == 2 {
+		principalDataToVerify = append(principalDataToVerify, version)
+		principalDataToVerify = append(principalDataToVerify, flags)
+		principalDataToVerify = append(principalDataToVerify, encryptedPayload...)
+	} else {
+		principalDataToVerify = encryptedPayload
+	}
+	if err := req.ClientKeystore.Verify(req.PrincipalPubKey, principalDataToVerify, principalSignature, hceepcrypto.ContextPayloadSignature); err != nil {
 		return nil, errors.New("principal signature verification failed: payload not signed by expected exploit owner")
 	}
 
 	// Build data to sign: encrypted_payload + expiration (8 bytes) + encrypted_args
 	// Client signature uses ContextClientSignature for domain separation
-	dataToSign := make([]byte, len(encryptedPayload)+8+len(encryptedArgs))
-	copy(dataToSign[0:len(encryptedPayload)], encryptedPayload)
-	binary.BigEndian.PutUint64(dataToSign[len(encryptedPayload):len(encryptedPayload)+8], uint64(expirationUnix))
-	copy(dataToSign[len(encryptedPayload)+8:], encryptedArgs)
+	// Version 1: ContextClientSignature || encrypted_payload || expiration || encrypted_args
+	// Version 2: ContextClientSignature || version || flags || encrypted_payload || expiration || encrypted_args
+	var dataToSign []byte
+	if version == 2 {
+		dataToSign = append(dataToSign, version)
+		dataToSign = append(dataToSign, flags)
+	}
+	dataToSign = append(dataToSign, encryptedPayload...)
+	expirationBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(expirationBuf, uint64(expirationUnix))
+	dataToSign = append(dataToSign, expirationBuf...)
+	dataToSign = append(dataToSign, encryptedArgs...)
 
 	signature, err := req.ClientKeystore.Sign(dataToSign, hceepcrypto.ContextClientSignature)
 	if err != nil {
@@ -217,9 +242,9 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	output = append(output, signature...)
 
 	// Write expiration timestamp (Unix timestamp, 8 bytes)
-	expirationBuf := make([]byte, 8)
-	binary.BigEndian.PutUint64(expirationBuf, uint64(expirationUnix))
-	output = append(output, expirationBuf...)
+	expirationBuf2 := make([]byte, 8)
+	binary.BigEndian.PutUint64(expirationBuf2, uint64(expirationUnix))
+	output = append(output, expirationBuf2...)
 
 	// Write encrypted args length
 	argsLenBuf := make([]byte, 4)

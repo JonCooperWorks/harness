@@ -251,19 +251,22 @@ The registry system automatically routes payloads to the correct loader based on
 ### Envelope Structure
 
 ```
-EO_Signature = Sign_EO(SHA256("harness:payload-signature" || encrypted_payload))
-where encrypted_payload = [metadata][encrypted_symmetric_key][encrypted_plugin_data]
+encrypted_payload = [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
+
+EO_Signature = Sign_EO(SHA-256("harness-payload-signature-v1" || encrypted_payload))
+// Version 2: includes version || flags before encrypted_payload
 
 Inner = Encrypt_X25519(TargetPub, [magic][version][flags][file_length][EO_Signature][encrypted_payload])
 
 Target_Signature = Sign_Target(
-    SHA256("harness:client-signature" || encrypted_payload || expiration || encrypted_args)
+    SHA-256("harness-client-signature-v1" || encrypted_payload || expiration || encrypted_args)
 )
+// Version 2: includes version || flags before encrypted_payload
 
 Approved Package (A) = Inner || Target_Signature || expiration || encrypted_args
 ```
 
-**Note:** Target signs a commitment to the encrypted executable (not the plaintext), plus the execution arguments and expiration. The Target cannot decrypt the executable itself — only Harness can decrypt using its private key.
+**Note:** Signatures use domain-separated contexts (`harness-payload-signature-v1` and `harness-client-signature-v1`) to prevent signature confusion attacks. The actual signing process computes `SHA-256(context || message)` then signs the digest with Ed25519. Version 2 format (recommended) includes version and flags in signature inputs to prevent header interpretation attacks. Target signs a commitment to the encrypted executable (not the plaintext), plus the execution arguments and expiration. The Target cannot decrypt the executable itself — only Harness can decrypt using its private key.
 
 ### Cryptographic Suite
 
