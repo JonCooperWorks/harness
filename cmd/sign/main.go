@@ -96,6 +96,7 @@ func main() {
 		ArgsJSON:        []byte(*argsJSON),
 		ClientKeystore:  targetKs,
 		PrincipalPubKey: exploitPubKey,
+		HarnessPubKey:   harnessPubKey,
 		PentesterPubKey: harnessPubKey,
 		Expiration:      &expirationTime,
 	}

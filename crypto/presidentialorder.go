@@ -93,6 +93,7 @@ const (
 type PresidentialOrderImpl struct {
 	clientPubKey    ed25519.PublicKey // Client's public key (for verifying argument signature)
 	principalPubKey ed25519.PublicKey // Principal's public key (for verifying payload signature)
+	harnessPubKey   ed25519.PublicKey // Harness's public key (for identity binding in signatures)
 	keystore        keystore.Keystore // Bound keystore for the harness/pentester key
 }
 
@@ -105,10 +106,11 @@ type PresidentialOrderImpl struct {
 // The harnessKeystore is a bound keystore for the pentester's key (use keystore.NewKeystoreForKey).
 // The clientPubKey is the client's public key for verifying argument signatures.
 // The principalPubKey is the principal's (EO's) public key for verifying payload signatures.
+// The harnessPubKey is the harness's public key for identity binding in signatures (HCEEP v0.3).
 //
 // The private key never leaves secure storage - all decryption operations happen
 // through the keystore interface, allowing hardware-backed or cloud-based key storage.
-func NewPresidentialOrderFromKeystore(harnessKeystore keystore.Keystore, clientPubKey ed25519.PublicKey, principalPubKey ed25519.PublicKey) (PresidentialOrder, error) {
+func NewPresidentialOrderFromKeystore(harnessKeystore keystore.Keystore, clientPubKey ed25519.PublicKey, principalPubKey ed25519.PublicKey, harnessPubKey ed25519.PublicKey) (PresidentialOrder, error) {
 	if harnessKeystore == nil {
 		return nil, errors.New("harness keystore cannot be nil")
 	}
@@ -118,10 +120,14 @@ func NewPresidentialOrderFromKeystore(harnessKeystore keystore.Keystore, clientP
 	if len(principalPubKey) == 0 {
 		return nil, errors.New("principal public key cannot be empty")
 	}
+	if len(harnessPubKey) == 0 {
+		return nil, errors.New("harness public key cannot be empty")
+	}
 
 	return &PresidentialOrderImpl{
 		clientPubKey:    clientPubKey,
 		principalPubKey: principalPubKey,
+		harnessPubKey:   harnessPubKey,
 		keystore:        harnessKeystore,
 	}, nil
 }
@@ -368,20 +374,30 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	}
 	encryptedPayload := fileData[encryptedPayloadStart:encryptedPayloadEnd]
 
-	// Verify principal signature BEFORE decryption
-	// EO signatures use ContextPayloadSignature for domain separation
-	// Version 1: ContextPayloadSignature || encrypted_payload
-	// Version 2: ContextPayloadSignature || version || flags || encrypted_payload
-	var principalDataToVerify []byte
-	if version == 2 {
-		principalDataToVerify = append(principalDataToVerify, version)
-		principalDataToVerify = append(principalDataToVerify, flags)
-		principalDataToVerify = append(principalDataToVerify, encryptedPayload...)
-	} else {
-		principalDataToVerify = encryptedPayload
+	// Rebuild canonical EO signature transcript for verification (HCEEP v0.3)
+	// Note: metadata was already read above and is part of encryptedPayload
+	eoTranscript, err := BuildEOTranscript(
+		string(hceepcrypto.ContextPayloadSignature),
+		uint32(version),
+		uint32(flags),
+		po.principalPubKey,
+		po.clientPubKey,
+		po.harnessPubKey,
+		metadata,
+		encryptedPayload,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build EO transcript for verification: %w", err)
 	}
-	if err := po.keystore.Verify(po.principalPubKey, principalDataToVerify, principalSignature, hceepcrypto.ContextPayloadSignature); err != nil {
-		return nil, errors.New("principal signature verification failed (signature must cover encrypted payload with ContextPayloadSignature)")
+
+	// Verify principal signature BEFORE decryption (HCEEP v0.3 uses direct transcript signing)
+	if err := po.keystore.VerifyDirect(po.principalPubKey, eoTranscript, principalSignature); err != nil {
+		return nil, errors.New("principal signature verification failed (signature must cover canonical transcript with identity binding)")
+	}
+
+	// Verify identity hashes match expected public keys (prevents key substitution attacks)
+	if err := VerifyIdentityHashes(eoTranscript, po.principalPubKey, po.clientPubKey, po.harnessPubKey); err != nil {
+		return nil, fmt.Errorf("identity hash verification failed: %w", err)
 	}
 
 	// Read encrypted symmetric key
@@ -455,23 +471,30 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, fmt.Errorf("file format error: expected %d bytes total, but file has %d bytes", pos, len(fileData))
 	}
 
-	// Verify client signature: Signature covers encrypted_payload + expiration (8 bytes) + encrypted_args
-	// Client signatures use ContextClientSignature for domain separation
-	// Version 1: ContextClientSignature || encrypted_payload || expiration || encrypted_args
-	// Version 2: ContextClientSignature || version || flags || encrypted_payload || expiration || encrypted_args
-	var dataToVerify []byte
-	if version == 2 {
-		dataToVerify = append(dataToVerify, version)
-		dataToVerify = append(dataToVerify, flags)
+	// Rebuild canonical Target signature transcript for verification (HCEEP v0.3)
+	targetTranscript, err := BuildTargetTranscript(
+		string(hceepcrypto.ContextClientSignature),
+		uint32(version),
+		uint32(flags),
+		po.principalPubKey,
+		po.clientPubKey,
+		po.harnessPubKey,
+		encryptedPayload,
+		encryptedArgs,
+		expirationUnix,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build Target transcript for verification: %w", err)
 	}
-	dataToVerify = append(dataToVerify, encryptedPayload...)
-	expirationBuf := make([]byte, 8)
-	binary.BigEndian.PutUint64(expirationBuf, uint64(expirationUnix))
-	dataToVerify = append(dataToVerify, expirationBuf...)
-	dataToVerify = append(dataToVerify, encryptedArgs...)
 
-	if err := po.keystore.Verify(po.clientPubKey, dataToVerify, clientSignature, hceepcrypto.ContextClientSignature); err != nil {
-		return nil, errors.New("client signature verification failed (signature must cover encrypted payload, expiration, and arguments with ContextClientSignature)")
+	// Verify client signature (HCEEP v0.3 uses direct transcript signing)
+	if err := po.keystore.VerifyDirect(po.clientPubKey, targetTranscript, clientSignature); err != nil {
+		return nil, errors.New("client signature verification failed (signature must cover canonical transcript with identity binding)")
+	}
+
+	// Verify identity hashes match expected public keys (prevents key substitution attacks)
+	if err := VerifyIdentityHashes(targetTranscript, po.principalPubKey, po.clientPubKey, po.harnessPubKey); err != nil {
+		return nil, fmt.Errorf("identity hash verification failed: %w", err)
 	}
 
 	// Create EnvelopeCipher for harness using the bound keystore

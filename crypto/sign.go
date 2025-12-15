@@ -39,6 +39,9 @@ type SignEncryptedPluginRequest struct {
 	// PrincipalPubKey is the exploit owner's (principal's) public key for verifying the payload signature.
 	// The exploit owner signature is verified before the target signs, ensuring cryptographic chain-of-custody.
 	PrincipalPubKey ed25519.PublicKey
+	// HarnessPubKey is the harness's (pentester's) public key for identity binding in signatures.
+	// Required for HCEEP v0.3 canonical transcript signing with identity hashes.
+	HarnessPubKey ed25519.PublicKey
 	// PentesterPubKey is the pentester's public key for encrypting arguments.
 	// Arguments are encrypted using X25519 key exchange with this public key.
 	PentesterPubKey ed25519.PublicKey
@@ -104,6 +107,9 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	}
 	if req.PentesterPubKey == nil {
 		return nil, errors.New("pentester public key cannot be nil")
+	}
+	if req.HarnessPubKey == nil {
+		return nil, errors.New("harness public key cannot be nil")
 	}
 
 	// Create EnvelopeCipher for target using the bound keystore
@@ -190,38 +196,62 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	// Encrypted payload = [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 	encryptedPayload := encryptedData[headerSize+4+principalSigLen:]
 
-	// Verify principal (exploit owner) signature BEFORE signing (ensures chain-of-custody)
-	// EO signatures use ContextPayloadSignature for domain separation
-	// Version 1: ContextPayloadSignature || encrypted_payload
-	// Version 2: ContextPayloadSignature || version || flags || encrypted_payload
-	var principalDataToVerify []byte
-	if version == 2 {
-		principalDataToVerify = append(principalDataToVerify, version)
-		principalDataToVerify = append(principalDataToVerify, flags)
-		principalDataToVerify = append(principalDataToVerify, encryptedPayload...)
-	} else {
-		principalDataToVerify = encryptedPayload
+	// Extract metadata from encrypted payload for EO transcript reconstruction
+	if len(encryptedPayload) < 4 {
+		return nil, errors.New("encrypted payload too short for metadata length")
 	}
-	if err := req.ClientKeystore.Verify(req.PrincipalPubKey, principalDataToVerify, principalSignature, hceepcrypto.ContextPayloadSignature); err != nil {
+	metadataLen := int(binary.BigEndian.Uint32(encryptedPayload[0:4]))
+	if len(encryptedPayload) < 4+metadataLen {
+		return nil, errors.New("encrypted payload too short for metadata")
+	}
+	metadata := encryptedPayload[4 : 4+metadataLen]
+
+	// Get target public key for identity hash
+	targetPubKey, err := req.ClientKeystore.PublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get target public key: %w", err)
+	}
+
+	// Rebuild canonical EO signature transcript for verification (HCEEP v0.3)
+	eoTranscript, err := BuildEOTranscript(
+		string(hceepcrypto.ContextPayloadSignature),
+		uint32(version),
+		uint32(flags),
+		req.PrincipalPubKey,
+		targetPubKey,
+		req.HarnessPubKey,
+		metadata,
+		encryptedPayload,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build EO transcript for verification: %w", err)
+	}
+
+	// Verify principal (exploit owner) signature BEFORE signing (ensures chain-of-custody)
+	// HCEEP v0.3 uses direct transcript signing with identity binding
+	if err := req.ClientKeystore.VerifyDirect(req.PrincipalPubKey, eoTranscript, principalSignature); err != nil {
 		return nil, errors.New("principal signature verification failed: payload not signed by expected exploit owner")
 	}
 
-	// Build data to sign: encrypted_payload + expiration (8 bytes) + encrypted_args
-	// Client signature uses ContextClientSignature for domain separation
-	// Version 1: ContextClientSignature || encrypted_payload || expiration || encrypted_args
-	// Version 2: ContextClientSignature || version || flags || encrypted_payload || expiration || encrypted_args
-	var dataToSign []byte
-	if version == 2 {
-		dataToSign = append(dataToSign, version)
-		dataToSign = append(dataToSign, flags)
+	// Build canonical Target signature transcript (HCEEP v0.3)
+	// Includes context string, version, flags, identity hashes, encrypted payload, encrypted args, and expiration
+	targetTranscript, err := BuildTargetTranscript(
+		string(hceepcrypto.ContextClientSignature),
+		uint32(version),
+		uint32(flags),
+		req.PrincipalPubKey,
+		targetPubKey,
+		req.HarnessPubKey,
+		encryptedPayload,
+		encryptedArgs,
+		expirationUnix,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build Target transcript: %w", err)
 	}
-	dataToSign = append(dataToSign, encryptedPayload...)
-	expirationBuf := make([]byte, 8)
-	binary.BigEndian.PutUint64(expirationBuf, uint64(expirationUnix))
-	dataToSign = append(dataToSign, expirationBuf...)
-	dataToSign = append(dataToSign, encryptedArgs...)
 
-	signature, err := req.ClientKeystore.Sign(dataToSign, hceepcrypto.ContextClientSignature)
+	// Sign the canonical transcript directly (HCEEP v0.3 uses direct signing, not hash-then-sign)
+	signature, err := req.ClientKeystore.SignDirect(targetTranscript)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign payload and arguments: %w", err)
 	}
@@ -258,12 +288,6 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	fileLengthBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(fileLengthBuf, uint32(len(output)))
 	copy(output[6:10], fileLengthBuf)
-
-	// Get target public key for hash calculation
-	targetPubKey, err := req.ClientKeystore.PublicKey()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get target public key: %w", err)
-	}
 
 	// Calculate hashes
 	encryptedPayloadHash := sha256.Sum256(encryptedPayload)

@@ -71,6 +71,11 @@ func (m *MockKeystore) Sign(msg, context Context) ([]byte, error) {
 	return signature, nil
 }
 
+func (m *MockKeystore) SignDirect(msg []byte) ([]byte, error) {
+	signature := ed25519.Sign(m.privateKey, msg)
+	return signature, nil
+}
+
 // Verify checks an Ed25519 signature against the provided public key.
 // The verification process computes SHA-256(context || msg) then verifies.
 // This matches the real keystore implementation exactly.
@@ -82,6 +87,13 @@ func (m *MockKeystore) Verify(pubKey ed25519.PublicKey, msg, sig, context Contex
 	digest := h.Sum(nil)
 
 	if !ed25519.Verify(pubKey, digest, sig) {
+		return errors.New("signature verification failed")
+	}
+	return nil
+}
+
+func (m *MockKeystore) VerifyDirect(pubKey ed25519.PublicKey, msg, sig []byte) error {
+	if !ed25519.Verify(pubKey, msg, sig) {
 		return errors.New("signature verification failed")
 	}
 	return nil

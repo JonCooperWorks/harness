@@ -196,6 +196,18 @@ func (k *keychainKeystore) Sign(msg, context Context) ([]byte, error) {
 	return signature, nil
 }
 
+// SignDirect creates an Ed25519 signature directly over the message bytes without hashing.
+func (k *keychainKeystore) SignDirect(msg []byte) ([]byte, error) {
+	privateKey, err := k.getPrivateKey()
+	if err != nil {
+		return nil, err
+	}
+
+	// Ed25519.Sign returns a 64-byte signature
+	signature := ed25519.Sign(privateKey, msg)
+	return signature, nil
+}
+
 // Verify checks an Ed25519 signature against the provided public key.
 // The verification process computes SHA-256(context || msg) then verifies.
 func (k *keychainKeystore) Verify(pubKey ed25519.PublicKey, msg, sig, context Context) error {
@@ -206,6 +218,14 @@ func (k *keychainKeystore) Verify(pubKey ed25519.PublicKey, msg, sig, context Co
 	digest := h.Sum(nil)
 
 	if !ed25519.Verify(pubKey, digest, sig) {
+		return errors.New("signature verification failed")
+	}
+	return nil
+}
+
+// VerifyDirect checks an Ed25519 signature directly against the message bytes without hashing.
+func (k *keychainKeystore) VerifyDirect(pubKey ed25519.PublicKey, msg, sig []byte) error {
+	if !ed25519.Verify(pubKey, msg, sig) {
 		return errors.New("signature verification failed")
 	}
 	return nil

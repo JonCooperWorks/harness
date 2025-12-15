@@ -74,8 +74,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create PresidentialOrder from bound keystore (harness private key + target's public key + exploit owner's public key)
-	po, err := crypto.NewPresidentialOrderFromKeystore(harnessKs, targetPubKey, exploitPubKey)
+	// Create PresidentialOrder from bound keystore (harness private key + target's public key + exploit owner's public key + harness public key)
+	po, err := crypto.NewPresidentialOrderFromKeystore(harnessKs, targetPubKey, exploitPubKey, harnessPubKey)
 	if err != nil {
 		logger.Error("failed to create PresidentialOrder from keystore", "error", err)
 		os.Exit(1)

@@ -184,6 +184,18 @@ func (w *windowsKeystore) Sign(msg, context Context) ([]byte, error) {
 	return signature, nil
 }
 
+// SignDirect creates an Ed25519 signature directly over the message bytes without hashing.
+func (w *windowsKeystore) SignDirect(msg []byte) ([]byte, error) {
+	privateKey, err := w.getPrivateKey()
+	if err != nil {
+		return nil, err
+	}
+
+	// Ed25519.Sign returns a 64-byte signature
+	signature := ed25519.Sign(privateKey, msg)
+	return signature, nil
+}
+
 // Verify checks an Ed25519 signature against the provided public key.
 // The verification process computes SHA-256(context || msg) then verifies.
 func (w *windowsKeystore) Verify(pubKey ed25519.PublicKey, msg, sig, context Context) error {
@@ -194,6 +206,14 @@ func (w *windowsKeystore) Verify(pubKey ed25519.PublicKey, msg, sig, context Con
 	digest := h.Sum(nil)
 
 	if !ed25519.Verify(pubKey, digest, sig) {
+		return errors.New("signature verification failed")
+	}
+	return nil
+}
+
+// VerifyDirect checks an Ed25519 signature directly against the message bytes without hashing.
+func (w *windowsKeystore) VerifyDirect(pubKey ed25519.PublicKey, msg, sig []byte) error {
+	if !ed25519.Verify(pubKey, msg, sig) {
 		return errors.New("signature verification failed")
 	}
 	return nil

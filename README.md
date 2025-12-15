@@ -253,20 +253,51 @@ The registry system automatically routes payloads to the correct loader based on
 ```
 encrypted_payload = [metadata_length:4][metadata][encrypted_symmetric_key][encrypted_plugin_data]
 
-EO_Signature = Sign_EO(SHA-256("harness-payload-signature-v1" || encrypted_payload))
-// Version 2: includes version || flags before encrypted_payload
+// Canonical EO signature transcript (see RFC section 5.0 for encoding rules):
+EO_transcript = [
+    context_string_length:4]["harness-payload-signature-v1"
+    version:4 (uint32, big-endian)
+    flags:4 (uint32, big-endian)
+    H(pk_EO):32 (SHA-256 hash of Exploit Owner public key)
+    H(pk_T):32 (SHA-256 hash of Target public key)
+    H(pk_H):32 (SHA-256 hash of Harness public key)
+    metadata_length:4][metadata
+    encrypted_payload_length:4][encrypted_payload
+]
+
+EO_Signature = Ed25519_sign(sk_EO, EO_transcript)
 
 Inner = Encrypt_X25519(TargetPub, [magic][version][flags][file_length][EO_Signature][encrypted_payload])
 
-Target_Signature = Sign_Target(
-    SHA-256("harness-client-signature-v1" || encrypted_payload || expiration || encrypted_args)
-)
-// Version 2: includes version || flags before encrypted_payload
+// Canonical Target signature transcript (see RFC section 5.0 for encoding rules):
+Target_transcript = [
+    context_string_length:4]["harness-client-signature-v1"
+    version:4 (uint32, big-endian)
+    flags:4 (uint32, big-endian)
+    H(pk_EO):32 (SHA-256 hash of Exploit Owner public key)
+    H(pk_T):32 (SHA-256 hash of Target public key)
+    H(pk_H):32 (SHA-256 hash of Harness public key)
+    encrypted_payload_length:4][encrypted_payload
+    encrypted_args_length:4][encrypted_args
+    expiration:8 (uint64, big-endian, Unix seconds)
+]
+
+Target_Signature = Ed25519_sign(sk_T, Target_transcript)
 
 Approved Package (A) = Inner || Target_Signature || expiration || encrypted_args
 ```
 
-**Note:** Signatures use domain-separated contexts (`harness-payload-signature-v1` and `harness-client-signature-v1`) to prevent signature confusion attacks. The actual signing process computes `SHA-256(context || message)` then signs the digest with Ed25519. Version 2 format (recommended) includes version and flags in signature inputs to prevent header interpretation attacks. Target signs a commitment to the encrypted executable (not the plaintext), plus the execution arguments and expiration. The Target cannot decrypt the executable itself — only Harness can decrypt using its private key.
+**Key Security Properties:**
+
+- **Canonical Encoding:** All signature transcripts use canonical encoding (length-prefixed fields, big-endian, explicit field order) to prevent transcript ambiguity attacks. See RFC section 5.0 for details.
+
+- **Identity Binding:** Identity hashes (`H(pk_EO)`, `H(pk_T)`, `H(pk_H)`) are cryptographically bound into signature transcripts, preventing key substitution attacks. KeyIDs are operational identifiers; cryptographic identity is established via public key hashes.
+
+- **Direct Transcript Signing:** Signatures are computed directly over canonical transcript bytes using `Ed25519_sign(sk, canonical_transcript_bytes)`, not hash-then-sign. Domain separation is achieved by prepending the context string as the first field of the transcript.
+
+- **Authorization Scope:** Target signature explicitly scopes approval to: this payload, these arguments, this time window, and these identities (bound via identity hashes).
+
+- **Not a Bearer Token:** The Approved Package **A** is NOT a bearer token. Execution requires `sk_H` for decryption and, in remote deployments, authenticated access to the Harness service. See RFC section 5.3.1 for details.
 
 ### Cryptographic Suite
 
@@ -287,7 +318,11 @@ Keys remain in OS keystores or HSMs.
 | Payload disclosure | AES-256-GCM; keys in secure keystore |
 | Chain-of-custody | EO + Target signatures with KeyIDs |
 | Stale approvals | Signed expiration timestamp |
-| Tampering | Signatures over SHA-256(context‖message) |
+| Tampering | Direct transcript signing with canonical encoding |
+| Key substitution | Identity hashes (`H(pk_EO)`, `H(pk_T)`, `H(pk_H)`) cryptographically bound in signature transcripts |
+| Identity confusion | All three identity hashes included in both EO and Target signatures, explicitly scoping approval |
+| Transcript ambiguity | Canonical encoding (length-prefixed fields, big-endian, explicit field order) ensures deterministic verification |
+| Header manipulation | Magic bytes, version, and flags authenticated via AEAD AAD or signature binding |
 | Replay (within window) | Allowed until expiration; callers can implement replay prevention using returned hashes |
 
 **Out of scope:**

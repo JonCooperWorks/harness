@@ -214,16 +214,30 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 	binary.BigEndian.PutUint32(fileLengthBuf, 0) // Placeholder
 	output = append(output, fileLengthBuf...)
 
-	// Build data to sign: version 2 includes version and flags in signature
-	// Version 2: ContextPayloadSignature || version || flags || encrypted_payload
-	var dataToSign []byte
-	dataToSign = append(dataToSign, version)
-	dataToSign = append(dataToSign, flags)
-	dataToSign = append(dataToSign, encryptedPayload...)
+	// Get principal (EO) public key for identity hash
+	principalPubKey, err := req.PrincipalKeystore.PublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get principal public key: %w", err)
+	}
 
-	// Sign with principal key using the EO signature context
-	// The context provides domain separation - EO signatures use ContextPayloadSignature
-	principalSignature, err := req.PrincipalKeystore.Sign(dataToSign, hceepcrypto.ContextPayloadSignature)
+	// Build canonical EO signature transcript (HCEEP v0.3)
+	// Includes context string, version, flags, identity hashes, metadata, and encrypted payload
+	eoTranscript, err := BuildEOTranscript(
+		string(hceepcrypto.ContextPayloadSignature),
+		uint32(version),
+		uint32(flags),
+		principalPubKey,
+		req.TargetPubKey,
+		req.HarnessPubKey,
+		metadataJSON,
+		encryptedPayload,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build EO transcript: %w", err)
+	}
+
+	// Sign the canonical transcript directly (HCEEP v0.3 uses direct signing, not hash-then-sign)
+	principalSignature, err := req.PrincipalKeystore.SignDirect(eoTranscript)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign encrypted payload: %w", err)
 	}
@@ -259,12 +273,6 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 	encryptedEnvelope, err := enc.EncryptToPeer(targetPubX32, hceepcrypto.ContextEnvelope, innerEnvelope)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt envelope to target: %w", err)
-	}
-
-	// Get principal public key for hash calculation
-	principalPubKey, err := req.PrincipalKeystore.PublicKey()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get principal public key: %w", err)
 	}
 
 	// Calculate hashes

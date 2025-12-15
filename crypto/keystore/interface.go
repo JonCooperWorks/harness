@@ -83,6 +83,31 @@ type Keystore interface {
 	// Returns nil if the signature is valid, or an error if verification fails.
 	Verify(pubKey ed25519.PublicKey, msg, sig, context Context) error
 
+	// SignDirect creates an Ed25519 signature directly over the message bytes without hashing.
+	//
+	// This method is used for HCEEP v0.3+ canonical transcript signing, where the transcript
+	// already includes domain separation (context string as first field) and identity binding.
+	// The message bytes are signed directly with Ed25519 without any pre-hashing.
+	//
+	// Use SignDirect() when signing canonical transcripts that include context strings and
+	// identity hashes as part of the transcript structure. Use Sign() for legacy hash-then-sign
+	// operations that require domain separation via context parameter.
+	//
+	// Returns a 64-byte Ed25519 signature.
+	SignDirect(msg []byte) (sig []byte, err error)
+
+	// VerifyDirect checks an Ed25519 signature directly against the message bytes without hashing.
+	//
+	// This method is used for HCEEP v0.3+ canonical transcript verification, where the transcript
+	// already includes domain separation and identity binding. The signature is verified directly
+	// against the message bytes without any pre-hashing.
+	//
+	// Use VerifyDirect() when verifying canonical transcripts. Use Verify() for legacy
+	// hash-then-sign verification.
+	//
+	// Returns nil if the signature is valid, or an error if verification fails.
+	VerifyDirect(pubKey ed25519.PublicKey, msg, sig []byte) error
+
 	// EncryptFor encrypts plaintext for a recipient using hybrid encryption.
 	//
 	// The encryption process:

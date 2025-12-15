@@ -108,8 +108,14 @@ func ExecutePlugin(ctx context.Context, req *ExecutePluginRequest) (*ExecutePlug
 		return nil, errors.New("exploit public key cannot be nil")
 	}
 
+	// Get harness public key for identity binding
+	harnessPubKey, err := req.HarnessKeystore.PublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get harness public key: %w", err)
+	}
+
 	// Create PresidentialOrder from bound keystore
-	po, err := crypto.NewPresidentialOrderFromKeystore(req.HarnessKeystore, req.TargetPubKey, req.ExploitPubKey)
+	po, err := crypto.NewPresidentialOrderFromKeystore(req.HarnessKeystore, req.TargetPubKey, req.ExploitPubKey, harnessPubKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create PresidentialOrder: %w", err)
 	}
@@ -119,9 +125,6 @@ func ExecutePlugin(ctx context.Context, req *ExecutePluginRequest) (*ExecutePlug
 	if err != nil {
 		return nil, fmt.Errorf("failed to verify and decrypt: %w", err)
 	}
-
-	// Get harness public key for hash calculation
-	harnessPubKey, err := req.HarnessKeystore.PublicKey()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get harness public key: %w", err)
 	}
