@@ -281,10 +281,10 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	}
 	pos += 4
 
-	// Read version (supports 1 and 2)
+	// Read version (must be 2)
 	version := fileData[pos]
-	if version != 1 && version != 2 {
-		return nil, fmt.Errorf("unsupported file format version: %d (expected 1 or 2)", version)
+	if version != 2 {
+		return nil, fmt.Errorf("unsupported file format version: %d (expected 2)", version)
 	}
 	pos++
 

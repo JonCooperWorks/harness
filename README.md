@@ -341,8 +341,8 @@ type Keystore interface {
     KeyID() KeyID
     PublicKey() (ed25519.PublicKey, error)
     PublicKeyX25519() ([32]byte, error)
-    Sign(msg, context []byte) ([]byte, error)
-    Verify(pub ed25519.PublicKey, msg, sig, context []byte) error
+    SignDirect(msg []byte) ([]byte, error)
+    VerifyDirect(pub ed25519.PublicKey, msg, sig []byte) error
     EncryptFor(peer [32]byte, plaintext, context []byte) ([]byte, KeyID, error)
     Decrypt(ciphertext, context []byte) ([]byte, KeyID, error)
 }

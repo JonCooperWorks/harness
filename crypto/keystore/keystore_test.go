@@ -6,7 +6,6 @@ import (
 	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"testing"
@@ -56,40 +55,9 @@ func (m *MockKeystore) PublicKeyX25519() ([32]byte, error) {
 	return ScalarBaseMult(x25519Priv)
 }
 
-// Sign creates an Ed25519 signature over the message with domain separation.
-// The signing process computes SHA-256(context || msg) then signs the digest.
-// This matches the real keystore implementation exactly.
-func (m *MockKeystore) Sign(msg, context Context) ([]byte, error) {
-	// Compute digest with domain separation: SHA-256(context || msg)
-	h := sha256.New()
-	h.Write(context)
-	h.Write(msg)
-	digest := h.Sum(nil)
-
-	// Ed25519.Sign returns a 64-byte signature
-	signature := ed25519.Sign(m.privateKey, digest)
-	return signature, nil
-}
-
 func (m *MockKeystore) SignDirect(msg []byte) ([]byte, error) {
 	signature := ed25519.Sign(m.privateKey, msg)
 	return signature, nil
-}
-
-// Verify checks an Ed25519 signature against the provided public key.
-// The verification process computes SHA-256(context || msg) then verifies.
-// This matches the real keystore implementation exactly.
-func (m *MockKeystore) Verify(pubKey ed25519.PublicKey, msg, sig, context Context) error {
-	// Compute digest with domain separation: SHA-256(context || msg)
-	h := sha256.New()
-	h.Write(context)
-	h.Write(msg)
-	digest := h.Sum(nil)
-
-	if !ed25519.Verify(pubKey, digest, sig) {
-		return errors.New("signature verification failed")
-	}
-	return nil
 }
 
 func (m *MockKeystore) VerifyDirect(pubKey ed25519.PublicKey, msg, sig []byte) error {
@@ -244,128 +212,6 @@ func TestKeyIDWiredCorrectly(t *testing.T) {
 	}
 }
 
-// TestSignVerifyRoundtrip tests that Sign + Verify works correctly.
-func TestSignVerifyRoundtrip(t *testing.T) {
-	ks, err := NewMockKeystore("test-key")
-	if err != nil {
-		t.Fatalf("failed to create mock keystore: %v", err)
-	}
-
-	pubKey, err := ks.PublicKey()
-	if err != nil {
-		t.Fatalf("failed to get public key: %v", err)
-	}
-
-	testCases := []struct {
-		name    string
-		msg     []byte
-		context Context
-	}{
-		{"simple-message", []byte("hello world"), Context("test-context")},
-		{"empty-message", []byte{}, Context("empty-msg-context")},
-		{"binary-message", []byte{0x00, 0xFF, 0x80, 0x7F}, Context("binary-context")},
-		{"payload-signature", []byte("encrypted payload hash"), Context("harness:payload-signature")},
-		{"client-signature", []byte("client approval data"), Context("harness:client-signature")},
-		{"long-message", bytes.Repeat([]byte("a"), 10000), Context("long-msg-context")},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// Sign the message
-			sig, err := ks.Sign(tc.msg, tc.context)
-			if err != nil {
-				t.Fatalf("Sign() failed: %v", err)
-			}
-
-			// Verify should succeed with correct public key
-			if err := ks.Verify(pubKey, tc.msg, sig, tc.context); err != nil {
-				t.Errorf("Verify() failed for valid signature: %v", err)
-			}
-		})
-	}
-}
-
-// TestVerifyFailsForTamperedData tests that Verify fails when data is tampered.
-func TestVerifyFailsForTamperedData(t *testing.T) {
-	ks, err := NewMockKeystore("test-key")
-	if err != nil {
-		t.Fatalf("failed to create mock keystore: %v", err)
-	}
-
-	pubKey, err := ks.PublicKey()
-	if err != nil {
-		t.Fatalf("failed to get public key: %v", err)
-	}
-
-	msg := []byte("original message")
-	context := Context("test-context")
-
-	sig, err := ks.Sign(msg, context)
-	if err != nil {
-		t.Fatalf("Sign() failed: %v", err)
-	}
-
-	// Test: tampered message should fail verification
-	t.Run("tampered-message", func(t *testing.T) {
-		tamperedMsg := []byte("tampered message")
-		if err := ks.Verify(pubKey, tamperedMsg, sig, context); err == nil {
-			t.Error("Verify() should fail for tampered message, but it succeeded")
-		}
-	})
-
-	// Test: wrong context should fail verification
-	t.Run("wrong-context", func(t *testing.T) {
-		wrongContext := Context("wrong-context")
-		if err := ks.Verify(pubKey, msg, sig, wrongContext); err == nil {
-			t.Error("Verify() should fail for wrong context, but it succeeded")
-		}
-	})
-
-	// Test: tampered signature should fail verification
-	t.Run("tampered-signature", func(t *testing.T) {
-		tamperedSig := make([]byte, len(sig))
-		copy(tamperedSig, sig)
-		tamperedSig[0] ^= 0xFF // Flip bits in first byte
-		if err := ks.Verify(pubKey, msg, tamperedSig, context); err == nil {
-			t.Error("Verify() should fail for tampered signature, but it succeeded")
-		}
-	})
-}
-
-// TestVerifyFailsForWrongPublicKey tests that Verify fails when using wrong public key.
-func TestVerifyFailsForWrongPublicKey(t *testing.T) {
-	ks1, err := NewMockKeystore("key-1")
-	if err != nil {
-		t.Fatalf("failed to create mock keystore 1: %v", err)
-	}
-
-	ks2, err := NewMockKeystore("key-2")
-	if err != nil {
-		t.Fatalf("failed to create mock keystore 2: %v", err)
-	}
-
-	// Get public key from second keystore
-	wrongPubKey, err := ks2.PublicKey()
-	if err != nil {
-		t.Fatalf("failed to get public key from ks2: %v", err)
-	}
-
-	msg := []byte("test message")
-	context := Context("test-context")
-
-	// Sign with first keystore
-	sig, err := ks1.Sign(msg, context)
-	if err != nil {
-		t.Fatalf("Sign() failed: %v", err)
-	}
-
-	// Verify with wrong public key should fail
-	// This tests that EO signature vs Client signature verification is explicit
-	if err := ks1.Verify(wrongPubKey, msg, sig, context); err == nil {
-		t.Error("Verify() should fail for wrong public key, but it succeeded")
-	}
-}
-
 // TestEncryptDecryptRoundtrip tests that EncryptFor + Decrypt roundtrip works.
 func TestEncryptDecryptRoundtrip(t *testing.T) {
 	// Create sender and recipient keystores
@@ -425,60 +271,6 @@ func TestEncryptDecryptRoundtrip(t *testing.T) {
 				t.Errorf("Decrypt() returned wrong plaintext:\ngot:  %v\nwant: %v", decrypted, tc.plaintext)
 			}
 		})
-	}
-}
-
-// TestContextDomainSeparation tests that different contexts produce different results.
-func TestContextDomainSeparation(t *testing.T) {
-	ks, err := NewMockKeystore("test-key")
-	if err != nil {
-		t.Fatalf("failed to create mock keystore: %v", err)
-	}
-
-	pubKey, err := ks.PublicKey()
-	if err != nil {
-		t.Fatalf("failed to get public key: %v", err)
-	}
-
-	msg := []byte("same message")
-	context1 := Context("harness:payload-signature")
-	context2 := Context("harness:client-signature")
-
-	// Sign with context1
-	sig1, err := ks.Sign(msg, context1)
-	if err != nil {
-		t.Fatalf("Sign() with context1 failed: %v", err)
-	}
-
-	// Sign with context2
-	sig2, err := ks.Sign(msg, context2)
-	if err != nil {
-		t.Fatalf("Sign() with context2 failed: %v", err)
-	}
-
-	// Signatures should be different (different contexts)
-	if bytes.Equal(sig1, sig2) {
-		t.Error("Signatures should be different for different contexts")
-	}
-
-	// Verify sig1 with context1 should succeed
-	if err := ks.Verify(pubKey, msg, sig1, context1); err != nil {
-		t.Errorf("Verify() failed for sig1 with context1: %v", err)
-	}
-
-	// Verify sig1 with context2 should fail (wrong context)
-	if err := ks.Verify(pubKey, msg, sig1, context2); err == nil {
-		t.Error("Verify() should fail for sig1 with wrong context2")
-	}
-
-	// Verify sig2 with context2 should succeed
-	if err := ks.Verify(pubKey, msg, sig2, context2); err != nil {
-		t.Errorf("Verify() failed for sig2 with context2: %v", err)
-	}
-
-	// Verify sig2 with context1 should fail (wrong context)
-	if err := ks.Verify(pubKey, msg, sig2, context1); err == nil {
-		t.Error("Verify() should fail for sig2 with wrong context1")
 	}
 }
 

@@ -32,7 +32,7 @@ type Context []byte
 //   - HSM / cloud KMS
 //   - in-memory (for dev/tests)
 //
-// The interface exposes primitives only (Sign, Verify, EncryptFor, Decrypt).
+// The interface exposes primitives only (SignDirect, VerifyDirect, EncryptFor, Decrypt).
 // Higher-level workflows should compose these primitives explicitly, making
 // verification targets clear (e.g., "verify EO signature" vs "verify client signature").
 //
@@ -57,41 +57,11 @@ type Keystore interface {
 	// This is the Montgomery-form public key converted from the Ed25519 public key.
 	PublicKeyX25519() ([32]byte, error)
 
-	// Sign creates an Ed25519 signature over the message with domain separation.
-	//
-	// The signing process:
-	//   1. Computes SHA-256(context || msg) to create a digest
-	//   2. Signs the digest with Ed25519 using this keystore's private key
-	//
-	// The context parameter provides domain separation / AAD. It MUST be provided
-	// and should be unique per operation type (e.g., "harness:payload-signature").
-	// Using consistent contexts prevents signature confusion attacks.
-	//
-	// Returns a 64-byte Ed25519 signature.
-	Sign(msg, context Context) (sig []byte, err error)
-
-	// Verify checks an Ed25519 signature against the provided public key.
-	//
-	// The verification process:
-	//   1. Computes SHA-256(context || msg) to create a digest
-	//   2. Verifies the signature against the digest using the provided public key
-	//
-	// The context parameter MUST match the context used during signing.
-	// The pubKey parameter specifies whose signature is being verified - this makes
-	// verification targets explicit (e.g., verify with EO's pubkey vs client's pubkey).
-	//
-	// Returns nil if the signature is valid, or an error if verification fails.
-	Verify(pubKey ed25519.PublicKey, msg, sig, context Context) error
-
 	// SignDirect creates an Ed25519 signature directly over the message bytes without hashing.
 	//
 	// This method is used for HCEEP v0.3+ canonical transcript signing, where the transcript
 	// already includes domain separation (context string as first field) and identity binding.
 	// The message bytes are signed directly with Ed25519 without any pre-hashing.
-	//
-	// Use SignDirect() when signing canonical transcripts that include context strings and
-	// identity hashes as part of the transcript structure. Use Sign() for legacy hash-then-sign
-	// operations that require domain separation via context parameter.
 	//
 	// Returns a 64-byte Ed25519 signature.
 	SignDirect(msg []byte) (sig []byte, err error)
@@ -101,9 +71,6 @@ type Keystore interface {
 	// This method is used for HCEEP v0.3+ canonical transcript verification, where the transcript
 	// already includes domain separation and identity binding. The signature is verified directly
 	// against the message bytes without any pre-hashing.
-	//
-	// Use VerifyDirect() when verifying canonical transcripts. Use Verify() for legacy
-	// hash-then-sign verification.
 	//
 	// Returns nil if the signature is valid, or an error if verification fails.
 	VerifyDirect(pubKey ed25519.PublicKey, msg, sig []byte) error

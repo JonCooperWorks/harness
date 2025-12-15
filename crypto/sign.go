@@ -174,8 +174,8 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	}
 	version := encryptedData[4]
 	flags := encryptedData[5]
-	if version != 1 && version != 2 {
-		return nil, fmt.Errorf("unsupported file format version: %d (expected 1 or 2)", version)
+	if version != 2 {
+		return nil, fmt.Errorf("unsupported file format version: %d (expected 2)", version)
 	}
 
 	// Extract principal signature and encrypted payload

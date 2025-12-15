@@ -8,7 +8,6 @@ import (
 	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -177,25 +176,6 @@ func (k *keychainKeystore) PublicKeyX25519() ([32]byte, error) {
 	return x25519Pub, nil
 }
 
-// Sign creates an Ed25519 signature over the message with domain separation.
-// The signing process computes SHA-256(context || msg) then signs the digest.
-func (k *keychainKeystore) Sign(msg, context Context) ([]byte, error) {
-	privateKey, err := k.getPrivateKey()
-	if err != nil {
-		return nil, err
-	}
-
-	// Compute digest with domain separation: SHA-256(context || msg)
-	h := sha256.New()
-	h.Write(context)
-	h.Write(msg)
-	digest := h.Sum(nil)
-
-	// Ed25519.Sign returns a 64-byte signature
-	signature := ed25519.Sign(privateKey, digest)
-	return signature, nil
-}
-
 // SignDirect creates an Ed25519 signature directly over the message bytes without hashing.
 func (k *keychainKeystore) SignDirect(msg []byte) ([]byte, error) {
 	privateKey, err := k.getPrivateKey()
@@ -206,21 +186,6 @@ func (k *keychainKeystore) SignDirect(msg []byte) ([]byte, error) {
 	// Ed25519.Sign returns a 64-byte signature
 	signature := ed25519.Sign(privateKey, msg)
 	return signature, nil
-}
-
-// Verify checks an Ed25519 signature against the provided public key.
-// The verification process computes SHA-256(context || msg) then verifies.
-func (k *keychainKeystore) Verify(pubKey ed25519.PublicKey, msg, sig, context Context) error {
-	// Compute digest with domain separation: SHA-256(context || msg)
-	h := sha256.New()
-	h.Write(context)
-	h.Write(msg)
-	digest := h.Sum(nil)
-
-	if !ed25519.Verify(pubKey, digest, sig) {
-		return errors.New("signature verification failed")
-	}
-	return nil
 }
 
 // VerifyDirect checks an Ed25519 signature directly against the message bytes without hashing.

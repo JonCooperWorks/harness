@@ -383,7 +383,7 @@ The envelope **E** is encrypted to the target's public key. Format (encrypted, i
 | Field                 | Size     | Description                              |
 |-----------------------|----------|------------------------------------------|
 | magic                 | 4        | Literal "HARN"                           |
-| version               | 1        | Version: 1 (legacy) or 2 (with version/flags binding) |
+| version               | 1        | Version: 2 (with version/flags binding) |
 | flags                 | 1        | Reserved                                 |
 | file_length           | 4        | Total size                               |
 | exploit_owner_sig_len | 4        | MUST be 64                               |
