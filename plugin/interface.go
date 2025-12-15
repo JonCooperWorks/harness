@@ -23,8 +23,8 @@ type Plugin interface {
 
 	// JSONSchema returns the JSON schema for the plugin's arguments.
 	// This schema defines what arguments are required and their types.
-	// The schema should be a valid JSON Schema string.
-	JSONSchema() string
+	// The schema should be a valid JSON Schema as raw JSON bytes.
+	JSONSchema() json.RawMessage
 
 	// Execute runs the plugin with the given context and JSON arguments.
 	// The args parameter contains the JSON execution arguments that were

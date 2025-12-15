@@ -69,10 +69,10 @@ func LoadPlugin(payload *crypto.Payload) (Plugin, error) {
 // - The plugin's JSON schema is invalid
 // - The args do not conform to the schema
 func ValidateArgs(plugin Plugin, args []byte) error {
-	schemaStr := plugin.JSONSchema()
+	schemaRaw := plugin.JSONSchema()
 
 	// Skip validation if schema is empty or trivial
-	schemaStr = strings.TrimSpace(schemaStr)
+	schemaStr := strings.TrimSpace(string(schemaRaw))
 	if schemaStr == "" || schemaStr == "{}" {
 		return nil
 	}

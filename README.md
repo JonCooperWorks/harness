@@ -52,7 +52,7 @@ All plugins must implement the `Plugin` interface:
 type Plugin interface {
     Name() string
     Description() string
-    JSONSchema() string
+    JSONSchema() json.RawMessage
     Execute(ctx context.Context, args json.RawMessage) (interface{}, error)
 }
 ```
@@ -60,7 +60,7 @@ type Plugin interface {
 **Methods:**
 - `Name()` — Unique plugin identifier (e.g., "cve-2025-55182-exploit")
 - `Description()` — Human-readable description
-- `JSONSchema()` — JSON Schema string defining argument structure
+- `JSONSchema()` — JSON Schema as raw JSON bytes defining argument structure
 - `Execute()` — Runs the plugin with JSON arguments, returns JSON-serializable result
 
 ### WASM Plugins (Default)
@@ -215,7 +215,7 @@ func (pp *PythonPlugin) Description() string {
     // Extract from script docstring or metadata
 }
 
-func (pp *PythonPlugin) JSONSchema() string {
+func (pp *PythonPlugin) JSONSchema() json.RawMessage {
     // Extract from script metadata
 }
 

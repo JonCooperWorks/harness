@@ -35,7 +35,7 @@ func (wl *WASMLoader) Load(data []byte, name string) (Plugin, error) {
 	config := extism.PluginConfig{
 		EnableWasi: true,
 	}
-	
+
 	// Note: Extism should provide extism_input_length, extism_input_load, and extism_output_set
 	// automatically, but they may need to be registered. For now, we'll try without explicit
 	// registration first, as Extism's runtime should handle these.
@@ -85,12 +85,12 @@ func (wp *WASMPlugin) Description() string {
 }
 
 // JSONSchema fetches the plugin schema via json_schema().
-func (wp *WASMPlugin) JSONSchema() string {
+func (wp *WASMPlugin) JSONSchema() json.RawMessage {
 	result, err := wp.callStringFunction("json_schema")
 	if err != nil {
-		return "{}"
+		return json.RawMessage("{}")
 	}
-	return result
+	return json.RawMessage(result)
 }
 
 // Execute calls the exported execute() function using Extism's input/output pattern.
