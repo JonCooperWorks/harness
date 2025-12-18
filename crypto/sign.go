@@ -3,7 +3,6 @@ package crypto
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -289,15 +288,12 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	binary.BigEndian.PutUint32(fileLengthBuf, uint32(len(output)))
 	copy(output[6:10], fileLengthBuf)
 
-	// Calculate hashes
+	// Calculate hashes (using raw Ed25519 bytes for consistency with transcript identity hashes)
 	encryptedPayloadHash := sha256.Sum256(encryptedPayload)
 	encryptedPayloadHashHex := hex.EncodeToString(encryptedPayloadHash[:])
 
-	targetPubKeyBytes, err := x509.MarshalPKIXPublicKey(targetPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal target public key: %w", err)
-	}
-	targetPubKeyHash := sha256.Sum256(targetPubKeyBytes)
+	// Use raw Ed25519 public key bytes (32 bytes) - matches HashPublicKey in transcript.go
+	targetPubKeyHash := sha256.Sum256(targetPubKey)
 	targetPubKeyHashHex := hex.EncodeToString(targetPubKeyHash[:])
 
 	return &SignEncryptedPluginResult{

@@ -105,21 +105,17 @@ func (k *KeyringKeyManager) getPrivateKey(keyID KeyID) (ed25519.PrivateKey, erro
 		return nil, fmt.Errorf("failed to decode PEM block")
 	}
 
-	// Try PKCS8 format
+	// Parse PKCS8 format (only supported format)
 	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err == nil {
-		if ed25519Key, ok := key.(ed25519.PrivateKey); ok {
-			return ed25519Key, nil
-		}
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse PKCS8 private key: %w", err)
+	}
+
+	ed25519Key, ok := key.(ed25519.PrivateKey)
+	if !ok {
 		return nil, fmt.Errorf("key is not Ed25519")
 	}
-
-	// Try raw Ed25519 private key (64 bytes)
-	if len(block.Bytes) == ed25519.PrivateKeySize {
-		return ed25519.PrivateKey(block.Bytes), nil
-	}
-
-	return nil, fmt.Errorf("failed to parse private key: unsupported format")
+	return ed25519Key, nil
 }
 
 // keyringKeystore implements Keystore for Linux, bound to a specific key.
@@ -229,7 +225,8 @@ func (k *keyringKeystore) EncryptFor(recipientPub [32]byte, plaintext []byte, co
 		return nil, k.keyID, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
+	// Use context as AAD for domain separation (RFC compliance)
+	ciphertext := gcm.Seal(nil, nonce, plaintext, context)
 
 	// Encode ephemeral X25519 public key (32 bytes)
 	ephemeralX25519PubBytes, err := Ed25519ToX25519PublicKey(ephemeralPublic)
@@ -298,8 +295,8 @@ func (k *keyringKeystore) Decrypt(ciphertext []byte, context Context) ([]byte, K
 		return nil, k.keyID, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	// Decrypt and verify authentication tag
-	plaintext, err := gcm.Open(nil, nonce, data, nil)
+	// Decrypt and verify authentication tag (context as AAD for domain separation)
+	plaintext, err := gcm.Open(nil, nonce, data, context)
 	if err != nil {
 		return nil, k.keyID, fmt.Errorf("failed to decrypt: %w", err)
 	}
@@ -320,19 +317,15 @@ func (k *keyringKeystore) getPrivateKey() (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("failed to decode PEM block")
 	}
 
-	// Try PKCS8 format
+	// Parse PKCS8 format (only supported format)
 	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err == nil {
-		if ed25519Key, ok := key.(ed25519.PrivateKey); ok {
-			return ed25519Key, nil
-		}
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse PKCS8 private key: %w", err)
+	}
+
+	ed25519Key, ok := key.(ed25519.PrivateKey)
+	if !ok {
 		return nil, fmt.Errorf("key is not Ed25519")
 	}
-
-	// Try raw Ed25519 private key (64 bytes)
-	if len(block.Bytes) == ed25519.PrivateKeySize {
-		return ed25519.PrivateKey(block.Bytes), nil
-	}
-
-	return nil, fmt.Errorf("failed to parse private key: unsupported format")
+	return ed25519Key, nil
 }

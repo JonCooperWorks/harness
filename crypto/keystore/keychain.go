@@ -12,7 +12,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/99designs/keyring"
 )
@@ -29,20 +28,16 @@ type KeychainKeyManager struct {
 }
 
 // NewKeychainKeyManager creates a new macOS Keychain key manager.
-// Uses HARNESS_KEYCHAIN environment variable if set, otherwise uses default login keychain.
-// Set HARNESS_KEYCHAIN="harness-keys" to use custom keychain, or "" for default login keychain.
+// Always uses the default login keychain for consistency and simplicity.
 func NewKeychainKeyManager() (KeyManager, error) {
-	keychainName := os.Getenv("HARNESS_KEYCHAIN")
-	// If not set, default to empty (login keychain) to avoid double password prompts
-	// Set HARNESS_KEYCHAIN="harness-keys" to use the custom keychain
-
+	// Always use default login keychain (empty string = login keychain)
+	// This avoids keychain access issues and provides consistent behavior
 	ring, err := keyring.Open(keyring.Config{
 		ServiceName:              "harness",
-		KeychainName:             keychainName, // Empty = default login keychain, "harness-keys" = custom keychain
-		KeychainPasswordFunc:     nil,          // Use default keychain
+		KeychainName:             "",  // Empty = default login keychain
+		KeychainPasswordFunc:     nil, // Use default keychain
 		KeychainTrustApplication: true,
-		// Use login keychain by default (unlocked when logged in, fewer prompts)
-		// Only prompt if using a custom keychain that requires unlocking
+		// Use login keychain (unlocked when logged in, fewer prompts)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open keychain: %w", err)
@@ -117,21 +112,17 @@ func (k *KeychainKeyManager) getPrivateKey(keyID KeyID) (ed25519.PrivateKey, err
 		return nil, fmt.Errorf("failed to decode PEM block")
 	}
 
-	// Try PKCS8 format
+	// Parse PKCS8 format (only supported format)
 	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err == nil {
-		if ed25519Key, ok := key.(ed25519.PrivateKey); ok {
-			return ed25519Key, nil
-		}
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse PKCS8 private key: %w", err)
+	}
+
+	ed25519Key, ok := key.(ed25519.PrivateKey)
+	if !ok {
 		return nil, fmt.Errorf("key is not Ed25519")
 	}
-
-	// Try raw Ed25519 private key (64 bytes)
-	if len(block.Bytes) == ed25519.PrivateKeySize {
-		return ed25519.PrivateKey(block.Bytes), nil
-	}
-
-	return nil, fmt.Errorf("failed to parse private key: unsupported format")
+	return ed25519Key, nil
 }
 
 // keychainKeystore implements Keystore for macOS, bound to a specific key.
@@ -239,7 +230,8 @@ func (k *keychainKeystore) EncryptFor(recipientPub [32]byte, plaintext []byte, c
 		return nil, k.keyID, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
+	// Use context as AAD for domain separation (RFC compliance)
+	ciphertext := gcm.Seal(nil, nonce, plaintext, context)
 
 	// Encode ephemeral X25519 public key (32 bytes)
 	ephemeralX25519PubBytes, err := Ed25519ToX25519PublicKey(ephemeralPublic)
@@ -308,8 +300,8 @@ func (k *keychainKeystore) Decrypt(ciphertext []byte, context Context) ([]byte, 
 		return nil, k.keyID, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	// Decrypt and verify authentication tag
-	plaintext, err := gcm.Open(nil, nonce, data, nil)
+	// Decrypt and verify authentication tag (context as AAD for domain separation)
+	plaintext, err := gcm.Open(nil, nonce, data, context)
 	if err != nil {
 		return nil, k.keyID, fmt.Errorf("failed to decrypt: %w", err)
 	}
@@ -330,19 +322,15 @@ func (k *keychainKeystore) getPrivateKey() (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("failed to decode PEM block")
 	}
 
-	// Try PKCS8 format
+	// Parse PKCS8 format (only supported format)
 	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err == nil {
-		if ed25519Key, ok := key.(ed25519.PrivateKey); ok {
-			return ed25519Key, nil
-		}
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse PKCS8 private key: %w", err)
+	}
+
+	ed25519Key, ok := key.(ed25519.PrivateKey)
+	if !ok {
 		return nil, fmt.Errorf("key is not Ed25519")
 	}
-
-	// Try raw Ed25519 private key (64 bytes)
-	if len(block.Bytes) == ed25519.PrivateKeySize {
-		return ed25519.PrivateKey(block.Bytes), nil
-	}
-
-	return nil, fmt.Errorf("failed to parse private key: unsupported format")
+	return ed25519Key, nil
 }

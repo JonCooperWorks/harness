@@ -111,7 +111,8 @@ func (m *MockKeystore) EncryptFor(recipientPub [32]byte, plaintext []byte, conte
 		return nil, m.keyID, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
+	// Use context as AAD for domain separation (RFC compliance)
+	ciphertext := gcm.Seal(nil, nonce, plaintext, context)
 
 	// Encode ephemeral X25519 public key (32 bytes)
 	ephemeralX25519PubBytes, err := Ed25519ToX25519PublicKey(ephemeralPublic)
@@ -176,8 +177,8 @@ func (m *MockKeystore) Decrypt(ciphertext []byte, context Context) ([]byte, KeyI
 		return nil, m.keyID, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	// Decrypt and verify authentication tag
-	plaintext, err := gcm.Open(nil, nonce, data, nil)
+	// Decrypt and verify authentication tag (context as AAD for domain separation)
+	plaintext, err := gcm.Open(nil, nonce, data, context)
 	if err != nil {
 		return nil, m.keyID, fmt.Errorf("failed to decrypt: %w", err)
 	}

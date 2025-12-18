@@ -5,7 +5,6 @@ import (
 	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -146,57 +145,48 @@ func VerifyAndDecryptWithHashes(po PresidentialOrder, fileData []byte, harnessPu
 	targetSigHash := sha256.Sum256(result.ClientSignature)
 	targetSigHashHex := hex.EncodeToString(targetSigHash[:])
 
-	// Calculate hash of target public key
-	targetPubKeyBytes, err := x509.MarshalPKIXPublicKey(targetPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal target public key: %w", err)
-	}
-	targetPubKeyHash := sha256.Sum256(targetPubKeyBytes)
+	// Calculate hash of target public key (using raw Ed25519 bytes for consistency with transcript identity hashes)
+	targetPubKeyHash := sha256.Sum256(targetPubKey)
 	targetPubKeyHashHex := hex.EncodeToString(targetPubKeyHash[:])
 
-	// Calculate hash of harness public key
-	harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal harness public key: %w", err)
-	}
-	harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
+	// Calculate hash of harness public key (using raw Ed25519 bytes)
+	harnessPubKeyHash := sha256.Sum256(harnessPubKey)
 	harnessPubKeyHashHex := hex.EncodeToString(harnessPubKeyHash[:])
 
 	// Calculate hash of exploit owner signature
 	exploitSigHash := sha256.Sum256(result.PrincipalSignature)
 	exploitSigHashHex := hex.EncodeToString(exploitSigHash[:])
 
-	// Calculate hash of exploit owner public key
-	exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(exploitPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal exploit owner public key: %w", err)
-	}
-	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
+	// Calculate hash of exploit owner public key (using raw Ed25519 bytes)
+	exploitPubKeyHash := sha256.Sum256(exploitPubKey)
 	exploitPubKeyHashHex := hex.EncodeToString(exploitPubKeyHash[:])
 
 	// Calculate encrypted payload hash deterministically by parsing offsets
 	// This matches the exact calculation used in VerifyAndDecrypt
 	const headerSize = 4 + 1 + 1 + 4 // magic + version + flags + file_length
+	const maxMetadataSize = 10000
 	if len(fileData) < headerSize+4 {
 		return nil, errors.New("file too short")
 	}
-	principalSigLen := int(binary.BigEndian.Uint32(fileData[headerSize : headerSize+4]))
+	principalSigLenU32 := binary.BigEndian.Uint32(fileData[headerSize : headerSize+4])
+	if principalSigLenU32 != 64 {
+		return nil, fmt.Errorf("invalid principal signature length: %d", principalSigLenU32)
+	}
+	principalSigLen := int(principalSigLenU32)
 	if len(fileData) < headerSize+4+principalSigLen+4 {
 		return nil, errors.New("file too short")
 	}
 	pos := headerSize + 4 + principalSigLen // Position after principal signature
 
-	// Read metadata length
+	// Read metadata length (validate as uint32 before casting)
 	if pos+4 > len(fileData) {
 		return nil, errors.New("file too short for metadata length")
 	}
-	metadataLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
-	if metadataLen > 10000 {
-		return nil, fmt.Errorf("metadata length %d exceeds maximum allowed size %d", metadataLen, 10000)
+	metadataLenU32 := binary.BigEndian.Uint32(fileData[pos : pos+4])
+	if metadataLenU32 > uint32(maxMetadataSize) {
+		return nil, fmt.Errorf("metadata length %d exceeds maximum allowed size %d", metadataLenU32, maxMetadataSize)
 	}
-	if metadataLen < 0 {
-		return nil, fmt.Errorf("invalid metadata length: %d", metadataLen)
-	}
+	metadataLen := int(metadataLenU32)
 	pos += 4
 
 	// Read metadata
@@ -211,6 +201,8 @@ func VerifyAndDecryptWithHashes(po PresidentialOrder, fileData []byte, harnessPu
 		SymmetricKeyLen int    `json:"symmetric_key_len"`
 		PluginDataLen   int    `json:"plugin_data_len"`
 		Algorithm       string `json:"algorithm"`
+		PluginType      string `json:"plugin_type"`
+		PluginName      string `json:"plugin_name"`
 	}
 	if err := json.Unmarshal(metadata, &metadataStruct); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
@@ -304,14 +296,15 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 
 	_ = flags // Reserved for future use
 
-	// Read principal signature length
+	// Read principal signature length (validate as uint32 before casting to avoid overflow)
 	if pos+4 > len(fileData) {
 		return nil, errors.New("file too short for principal signature length")
 	}
-	principalSigLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
-	if principalSigLen != 64 {
-		return nil, fmt.Errorf("invalid principal signature length: %d (expected 64 bytes for Ed25519)", principalSigLen)
+	principalSigLenU32 := binary.BigEndian.Uint32(fileData[pos : pos+4])
+	if principalSigLenU32 != 64 {
+		return nil, fmt.Errorf("invalid principal signature length: %d (expected 64 bytes for Ed25519)", principalSigLenU32)
 	}
+	principalSigLen := int(principalSigLenU32)
 	pos += 4
 
 	// Read principal signature
@@ -321,17 +314,15 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	principalSignature := fileData[pos : pos+principalSigLen]
 	pos += principalSigLen
 
-	// Read metadata length
+	// Read metadata length (validate as uint32 before casting to avoid overflow on 32-bit systems)
 	if pos+4 > len(fileData) {
 		return nil, errors.New("file too short for metadata length")
 	}
-	metadataLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
-	if metadataLen > maxMetadataSize {
-		return nil, fmt.Errorf("metadata length %d exceeds maximum allowed size %d", metadataLen, maxMetadataSize)
+	metadataLenU32 := binary.BigEndian.Uint32(fileData[pos : pos+4])
+	if metadataLenU32 > uint32(maxMetadataSize) {
+		return nil, fmt.Errorf("metadata length %d exceeds maximum allowed size %d", metadataLenU32, maxMetadataSize)
 	}
-	if metadataLen < 0 {
-		return nil, fmt.Errorf("invalid metadata length: %d", metadataLen)
-	}
+	metadataLen := int(metadataLenU32)
 	pos += 4
 
 	// Read metadata
@@ -341,28 +332,25 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	metadata := fileData[pos : pos+metadataLen]
 	pos += metadataLen
 
-	// Parse metadata to get encrypted symmetric key length
+	// Parse metadata to get encrypted symmetric key length and AAD info
 	var metadataStruct struct {
 		SymmetricKeyLen int    `json:"symmetric_key_len"`
 		PluginDataLen   int    `json:"plugin_data_len"`
 		Algorithm       string `json:"algorithm"`
+		PluginType      string `json:"plugin_type"`
+		PluginName      string `json:"plugin_name"`
 	}
 	if err := json.Unmarshal(metadata, &metadataStruct); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
 
 	// Enforce max size limits (DoS protection)
-	if metadataStruct.SymmetricKeyLen > MaxEncryptedSymmetricKeySize {
-		return nil, fmt.Errorf("encrypted symmetric key size %d exceeds maximum %d", metadataStruct.SymmetricKeyLen, MaxEncryptedSymmetricKeySize)
+	// Note: JSON unmarshals numbers as int, so negative values indicate overflow/malicious input
+	if metadataStruct.SymmetricKeyLen < 0 || metadataStruct.SymmetricKeyLen > MaxEncryptedSymmetricKeySize {
+		return nil, fmt.Errorf("invalid encrypted symmetric key size: %d (max %d)", metadataStruct.SymmetricKeyLen, MaxEncryptedSymmetricKeySize)
 	}
-	if metadataStruct.PluginDataLen > MaxEncryptedPluginDataSize {
-		return nil, fmt.Errorf("encrypted plugin data size %d exceeds maximum %d", metadataStruct.PluginDataLen, MaxEncryptedPluginDataSize)
-	}
-	if metadataStruct.SymmetricKeyLen < 0 {
-		return nil, fmt.Errorf("invalid encrypted symmetric key size: %d", metadataStruct.SymmetricKeyLen)
-	}
-	if metadataStruct.PluginDataLen < 0 {
-		return nil, fmt.Errorf("invalid encrypted plugin data size: %d", metadataStruct.PluginDataLen)
+	if metadataStruct.PluginDataLen < 0 || metadataStruct.PluginDataLen > MaxEncryptedPluginDataSize {
+		return nil, fmt.Errorf("invalid encrypted plugin data size: %d (max %d)", metadataStruct.PluginDataLen, MaxEncryptedPluginDataSize)
 	}
 
 	// Calculate encrypted payload for signature verification
@@ -414,14 +402,15 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	encryptedPluginData := fileData[pos : pos+metadataStruct.PluginDataLen]
 	pos += metadataStruct.PluginDataLen
 
-	// Read client signature length
+	// Read client signature length (validate as uint32 before casting)
 	if pos+4 > len(fileData) {
 		return nil, errors.New("file too short for client signature length")
 	}
-	clientSigLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
-	if clientSigLen != 64 {
-		return nil, fmt.Errorf("invalid client signature length: %d (expected 64 bytes for Ed25519)", clientSigLen)
+	clientSigLenU32 := binary.BigEndian.Uint32(fileData[pos : pos+4])
+	if clientSigLenU32 != 64 {
+		return nil, fmt.Errorf("invalid client signature length: %d (expected 64 bytes for Ed25519)", clientSigLenU32)
 	}
+	clientSigLen := int(clientSigLenU32)
 	pos += 4
 
 	// Read client signature
@@ -444,20 +433,16 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, fmt.Errorf("payload has expired: expiration was %s, current time is %s", expirationTime.Format(time.RFC3339), time.Now().Format(time.RFC3339))
 	}
 
-	// Read encrypted args length
+	// Read encrypted args length (validate as uint32 before casting)
 	if pos+4 > len(fileData) {
 		return nil, errors.New("file too short for encrypted args length")
 	}
-	encryptedArgsLen := int(binary.BigEndian.Uint32(fileData[pos : pos+4]))
+	encryptedArgsLenU32 := binary.BigEndian.Uint32(fileData[pos : pos+4])
+	if encryptedArgsLenU32 > uint32(MaxEncryptedArgsSize) {
+		return nil, fmt.Errorf("encrypted args size %d exceeds maximum %d", encryptedArgsLenU32, MaxEncryptedArgsSize)
+	}
+	encryptedArgsLen := int(encryptedArgsLenU32)
 	pos += 4
-
-	// Enforce max size limit for encrypted args (DoS protection)
-	if encryptedArgsLen > MaxEncryptedArgsSize {
-		return nil, fmt.Errorf("encrypted args size %d exceeds maximum %d", encryptedArgsLen, MaxEncryptedArgsSize)
-	}
-	if encryptedArgsLen < 0 {
-		return nil, fmt.Errorf("invalid encrypted args size: %d", encryptedArgsLen)
-	}
 
 	// Read encrypted args
 	if pos+encryptedArgsLen > len(fileData) {
@@ -506,8 +491,19 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 		return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
 	}
 
-	// Decrypt plugin data using AES
-	pluginData, err := decryptAES(encryptedPluginData, symmetricKey)
+	// Reconstruct AAD for payload decryption (must match encryption)
+	// Per RFC section 5.1 step 2, AAD includes plugin type and name
+	payloadAAD := struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}{Type: metadataStruct.PluginType, Name: metadataStruct.PluginName}
+	payloadAADBytes, err := json.Marshal(payloadAAD)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal payload AAD: %w", err)
+	}
+
+	// Decrypt plugin data using AES with AAD
+	pluginData, err := decryptAES(encryptedPluginData, symmetricKey, payloadAADBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt plugin data: %w", err)
 	}
@@ -535,8 +531,10 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	}, nil
 }
 
-// decryptAES decrypts data using AES-256-GCM
-func decryptAES(ciphertext, key []byte) ([]byte, error) {
+// decryptAES decrypts data using AES-256-GCM with Associated Authenticated Data (AAD).
+// The AAD must match what was used during encryption for domain separation.
+// Per RFC section 5.1 step 2, metadata should be used as AAD for payload decryption.
+func decryptAES(ciphertext, key, aad []byte) ([]byte, error) {
 	if len(ciphertext) < 12+16 { // Need at least nonce (12) + tag (16)
 		return nil, errors.New("ciphertext too short")
 	}
@@ -560,8 +558,9 @@ func decryptAES(ciphertext, key []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	// Decrypt and verify authentication tag
-	plaintext, err := gcm.Open(nil, nonce, data, nil)
+	// Decrypt and verify authentication tag with AAD
+	// AAD must match what was used during encryption
+	plaintext, err := gcm.Open(nil, nonce, data, aad)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt data: %w", err)
 	}

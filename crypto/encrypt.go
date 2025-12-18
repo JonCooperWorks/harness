@@ -9,7 +9,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -162,8 +161,19 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 		return nil, fmt.Errorf("failed to generate symmetric key: %w", err)
 	}
 
-	// Encrypt plugin data with AES
-	encryptedPluginData, err := encryptAES(payloadJSON, symmetricKey)
+	// Create AAD for payload encryption (RFC section 5.1 step 2)
+	// AAD includes plugin type and name to prevent ciphertext substitution attacks
+	payloadAAD := struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}{Type: req.PluginType, Name: pluginName}
+	payloadAADBytes, err := json.Marshal(payloadAAD)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal payload AAD: %w", err)
+	}
+
+	// Encrypt plugin data with AES using AAD
+	encryptedPluginData, err := encryptAES(payloadJSON, symmetricKey, payloadAADBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt plugin data: %w", err)
 	}
@@ -174,11 +184,13 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 		return nil, fmt.Errorf("failed to encrypt symmetric key: %w", err)
 	}
 
-	// Create metadata
+	// Create metadata (includes plugin type/name for AAD reconstruction during decryption)
 	metadata := map[string]interface{}{
 		"symmetric_key_len": len(encryptedSymmetricKey),
 		"plugin_data_len":   len(encryptedPluginData),
 		"algorithm":         "Ed25519+X25519+AES-256-GCM",
+		"plugin_type":       req.PluginType,
+		"plugin_name":       pluginName,
 	}
 	metadataJSON, err := json.Marshal(metadata)
 	if err != nil {
@@ -275,22 +287,15 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 		return nil, fmt.Errorf("failed to encrypt envelope to target: %w", err)
 	}
 
-	// Calculate hashes
+	// Calculate hashes (using raw Ed25519 bytes for consistency with transcript identity hashes)
 	exploitSigHash := sha256.Sum256(principalSig)
 	exploitSigHashHex := hex.EncodeToString(exploitSigHash[:])
 
-	exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(principalPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal exploit owner public key: %w", err)
-	}
-	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
+	// Use raw Ed25519 public key bytes (32 bytes) - matches HashPublicKey in transcript.go
+	exploitPubKeyHash := sha256.Sum256(principalPubKey)
 	exploitPubKeyHashHex := hex.EncodeToString(exploitPubKeyHash[:])
 
-	harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(req.HarnessPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal harness public key: %w", err)
-	}
-	harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
+	harnessPubKeyHash := sha256.Sum256(req.HarnessPubKey)
 	harnessPubKeyHashHex := hex.EncodeToString(harnessPubKeyHash[:])
 
 	return &EncryptPluginResult{
@@ -305,8 +310,10 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 	}, nil
 }
 
-// encryptAES encrypts data using AES-256-GCM
-func encryptAES(plaintext, key []byte) ([]byte, error) {
+// encryptAES encrypts data using AES-256-GCM with Associated Authenticated Data (AAD).
+// The AAD provides domain separation and prevents ciphertext substitution attacks.
+// Per RFC section 5.1 step 2, metadata should be used as AAD for payload encryption.
+func encryptAES(plaintext, key, aad []byte) ([]byte, error) {
 	if len(key) != 32 {
 		return nil, errors.New("key must be 32 bytes for AES-256")
 	}
@@ -328,8 +335,9 @@ func encryptAES(plaintext, key []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
-	// Encrypt and authenticate (ciphertext includes authentication tag)
-	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
+	// Encrypt and authenticate with AAD (ciphertext includes authentication tag)
+	// AAD is authenticated but not encrypted - used for domain separation
+	ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
 
 	// Prepend nonce
 	result := append(nonce, ciphertext...)

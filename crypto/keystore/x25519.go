@@ -167,11 +167,18 @@ func ScalarMult(privScalar []byte, peerPubKey [32]byte) ([32]byte, error) {
 	return result, nil
 }
 
-// DeriveKeyFromSecret derives a 32-byte AES key using HKDF-SHA256 with context.
+// hceepHKDFSalt is a protocol-specific salt for HKDF key derivation.
+// Using a fixed, protocol-specific salt provides:
+// - Domain separation from other applications using the same key material
+// - Defense against pre-computation attacks on HKDF
+// - Compliance with cryptographic best practices (RFC 5869 recommends non-empty salt)
+var hceepHKDFSalt = []byte("HCEEP-v2")
+
+// DeriveKeyFromSecret derives a 32-byte AES key using HKDF-SHA256 with context and protocol salt.
 // This is a shared implementation used by all keystore backends.
 func DeriveKeyFromSecret(sharedSecret []byte, context Context) ([32]byte, error) {
 	paddedSecret := padSharedSecret(sharedSecret)
-	keyBytes, err := hkdf.Key(sha256.New, paddedSecret, nil, string(context), 32)
+	keyBytes, err := hkdf.Key(sha256.New, paddedSecret, hceepHKDFSalt, string(context), 32)
 	if err != nil {
 		var key [32]byte
 		return key, fmt.Errorf("failed to derive key: %w", err)
