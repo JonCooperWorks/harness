@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -137,32 +136,20 @@ func ExecutePlugin(ctx context.Context, req *ExecutePluginRequest) (*ExecutePlug
 	targetSigHash := sha256.Sum256(result.ClientSignature)
 	targetSigHashHex := hex.EncodeToString(targetSigHash[:])
 
-	// Calculate hash of target public key
-	targetPubKeyBytes, err := x509.MarshalPKIXPublicKey(req.TargetPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal target public key: %w", err)
-	}
-	targetPubKeyHash := sha256.Sum256(targetPubKeyBytes)
+	// Calculate hash of target public key (using raw Ed25519 bytes for consistency with transcript identity hashes)
+	targetPubKeyHash := sha256.Sum256(req.TargetPubKey)
 	targetPubKeyHashHex := hex.EncodeToString(targetPubKeyHash[:])
 
-	// Calculate hash of harness public key
-	harnessPubKeyBytes, err := x509.MarshalPKIXPublicKey(harnessPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal harness public key: %w", err)
-	}
-	harnessPubKeyHash := sha256.Sum256(harnessPubKeyBytes)
+	// Calculate hash of harness public key (using raw Ed25519 bytes)
+	harnessPubKeyHash := sha256.Sum256(harnessPubKey)
 	harnessPubKeyHashHex := hex.EncodeToString(harnessPubKeyHash[:])
 
 	// Calculate hash of exploit owner signature
 	exploitSigHash := sha256.Sum256(result.PrincipalSignature)
 	exploitSigHashHex := hex.EncodeToString(exploitSigHash[:])
 
-	// Calculate hash of exploit owner public key
-	exploitPubKeyBytes, err := x509.MarshalPKIXPublicKey(req.ExploitPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal exploit owner public key: %w", err)
-	}
-	exploitPubKeyHash := sha256.Sum256(exploitPubKeyBytes)
+	// Calculate hash of exploit owner public key (using raw Ed25519 bytes)
+	exploitPubKeyHash := sha256.Sum256(req.ExploitPubKey)
 	exploitPubKeyHashHex := hex.EncodeToString(exploitPubKeyHash[:])
 
 	// Calculate encrypted payload hash
