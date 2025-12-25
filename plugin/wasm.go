@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"time"
 
 	extism "github.com/extism/go-sdk"
 )
@@ -36,10 +38,17 @@ func (wl *WASMLoader) Load(data []byte, name string) (Plugin, error) {
 		EnableWasi: true,
 	}
 
-	// Note: Extism should provide extism_input_length, extism_input_load, and extism_output_set
-	// automatically, but they may need to be registered. For now, we'll try without explicit
-	// registration first, as Extism's runtime should handle these.
-	plugin, err := extism.NewPlugin(ctx, manifest, config, []extism.HostFunction{})
+	// Register host functions for network operations
+	// These match the exact WASM import signatures from the compiled plugin
+	hostFunctions := []extism.HostFunction{
+		// TCP functions - imported from "env" module
+		newTCPConnectFunction(),
+		newTCPSendFunction(),
+		newTCPRecvFunction(),
+		newTCPCloseFunction(),
+	}
+
+	plugin, err := extism.NewPlugin(ctx, manifest, config, hostFunctions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Extism plugin: %w", err)
 	}
@@ -139,4 +148,174 @@ func (wp *WASMPlugin) callStringFunction(functionName string) (string, error) {
 	}
 
 	return string(resultBytes), nil
+}
+
+// TCP connection management - store connections by ID
+var (
+	tcpConnections        = make(map[uint32]*net.TCPConn)
+	tcpConnID      uint32 = 1
+)
+
+// newTCPConnectFunction creates a host function for TCP connections.
+// WASM signature: (param i64) (result i32) - takes address offset, returns connection ID
+func newTCPConnectFunction() extism.HostFunction {
+	fn := extism.NewHostFunctionWithStack(
+		"tcp_connect",
+		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+			// Read address string from plugin memory (offset is i64 in stack[0])
+			addrOffset := stack[0]
+			addr, err := p.ReadString(addrOffset)
+			if err != nil {
+				stack[0] = 0 // Return 0 on error (invalid connection ID)
+				p.Log(extism.LogLevelError, fmt.Sprintf("tcp_connect: failed to read address: %v", err))
+				return
+			}
+
+			// Establish TCP connection
+			conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+			if err != nil {
+				stack[0] = 0 // Return 0 on error
+				p.Log(extism.LogLevelError, fmt.Sprintf("tcp_connect: failed to connect to %s: %v", addr, err))
+				return
+			}
+
+			// Store connection and return ID
+			tcpConnID++
+			connID := tcpConnID
+			tcpConnections[connID] = conn.(*net.TCPConn)
+			stack[0] = uint64(connID)
+			p.Log(extism.LogLevelInfo, fmt.Sprintf("tcp_connect: connected to %s (conn_id=%d)", addr, connID))
+		},
+		[]extism.ValueType{extism.ValueTypeI64}, // addr_offset: i64
+		[]extism.ValueType{extism.ValueTypeI32}, // conn_id: i32
+	)
+	fn.SetNamespace("env")
+	return fn
+}
+
+// newTCPSendFunction creates a host function for sending data over TCP.
+// WASM signature: (param i32 i64 i64) (result i32) - conn_id, data_offset, data_len -> bytes_sent
+func newTCPSendFunction() extism.HostFunction {
+	fn := extism.NewHostFunctionWithStack(
+		"tcp_send",
+		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+			connID := uint32(stack[0]) // i32
+			dataOffset := stack[1]     // i64
+			dataLen := stack[2]        // i64
+
+			// Get connection
+			conn, ok := tcpConnections[connID]
+			if !ok {
+				stack[0] = 0 // Return 0 bytes sent on error
+				p.Log(extism.LogLevelError, fmt.Sprintf("tcp_send: invalid connection ID %d", connID))
+				return
+			}
+
+			// Read data from plugin memory
+			data, err := p.ReadBytes(dataOffset)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("tcp_send: failed to read data: %v", err))
+				return
+			}
+
+			// Limit to requested length
+			if uint64(len(data)) > dataLen {
+				data = data[:dataLen]
+			}
+
+			// Send data
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			bytesSent, err := conn.Write(data)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("tcp_send: failed to send data: %v", err))
+				return
+			}
+
+			stack[0] = uint64(bytesSent)
+			p.Log(extism.LogLevelInfo, fmt.Sprintf("tcp_send: sent %d bytes on conn_id=%d", bytesSent, connID))
+		},
+		[]extism.ValueType{extism.ValueTypeI32, extism.ValueTypeI64, extism.ValueTypeI64}, // conn_id, data_offset, data_len
+		[]extism.ValueType{extism.ValueTypeI32},                                           // bytes_sent: i32
+	)
+	fn.SetNamespace("env")
+	return fn
+}
+
+// newTCPRecvFunction creates a host function for receiving data over TCP.
+// WASM signature: (param i32 i32) (result i64) - conn_id, max_len -> data_offset
+func newTCPRecvFunction() extism.HostFunction {
+	fn := extism.NewHostFunctionWithStack(
+		"tcp_recv",
+		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+			connID := uint32(stack[0]) // i32
+			maxLen := uint32(stack[1]) // i32
+
+			// Get connection
+			conn, ok := tcpConnections[connID]
+			if !ok {
+				stack[0] = 0 // Return 0 (invalid offset) on error
+				p.Log(extism.LogLevelError, fmt.Sprintf("tcp_recv: invalid connection ID %d", connID))
+				return
+			}
+
+			// Read data with timeout
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			buf := make([]byte, maxLen)
+			bytesRead, err := conn.Read(buf)
+			if err != nil {
+				// Check if it's a timeout (which might be expected)
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					// Timeout is not necessarily an error - return empty data
+					stack[0] = 0
+					return
+				}
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("tcp_recv: failed to receive data: %v", err))
+				return
+			}
+
+			// Write received data to plugin memory
+			dataOffset, err := p.WriteBytes(buf[:bytesRead])
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("tcp_recv: failed to write data to plugin memory: %v", err))
+				return
+			}
+
+			stack[0] = dataOffset // Return i64 offset
+			p.Log(extism.LogLevelInfo, fmt.Sprintf("tcp_recv: received %d bytes on conn_id=%d", bytesRead, connID))
+		},
+		[]extism.ValueType{extism.ValueTypeI32, extism.ValueTypeI32}, // conn_id, max_len: both i32
+		[]extism.ValueType{extism.ValueTypeI64},                      // data_offset: i64
+	)
+	fn.SetNamespace("env")
+	return fn
+}
+
+// newTCPCloseFunction creates a host function for closing TCP connections.
+// WASM signature: (param i32) -> void - takes conn_id, returns nothing
+func newTCPCloseFunction() extism.HostFunction {
+	fn := extism.NewHostFunctionWithStack(
+		"tcp_close",
+		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+			connID := uint32(stack[0]) // i32
+
+			// Get and close connection
+			conn, ok := tcpConnections[connID]
+			if !ok {
+				p.Log(extism.LogLevelWarn, fmt.Sprintf("tcp_close: invalid connection ID %d", connID))
+				return
+			}
+
+			conn.Close()
+			delete(tcpConnections, connID)
+			p.Log(extism.LogLevelInfo, fmt.Sprintf("tcp_close: closed conn_id=%d", connID))
+		},
+		[]extism.ValueType{extism.ValueTypeI32}, // conn_id: i32
+		[]extism.ValueType{},                    // void
+	)
+	fn.SetNamespace("env")
+	return fn
 }

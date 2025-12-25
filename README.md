@@ -79,10 +79,56 @@ WASM is the default execution environment. Plugins can be written in any languag
 | Example | Directory | Description |
 |---------|-----------|-------------|
 | cve-2025-55182 | [`examples/cve-2025-55182/`](examples/cve-2025-55182/) | Next.js/React.js prototype pollution and command injection exploit |
+| cve-2025-3243  | [`examples/cve-2025-3243/`](examples/cve-2025-3243/)  | SSH pre-auth channel request with Erlang RCE payload (uses raw TCP host functions) |
 | get-ip         | [`examples/get-ip/`](examples/get-ip/)                 | Simple HTTP request example |
 | hello-world    | [`examples/hello-world/`](examples/hello-world/)       | Basic plugin template |
 
 Each example includes source code, build instructions, and usage examples.
+
+### Network Host Functions
+
+The harness provides raw network socket host functions to WASM plugins, enabling low-level network operations that aren't natively available in WebAssembly:
+
+**TCP Functions:**
+- `tcp_connect(addr_offset: u64) -> u32` - Connect to a TCP address (returns connection ID or 0 on error)
+- `tcp_send(conn_id: u32, data_offset: u64, data_len: u64) -> u32` - Send data over TCP (returns bytes sent)
+- `tcp_recv(conn_id: u32, max_len: u32) -> u64` - Receive data from TCP (returns memory offset to data or 0)
+- `tcp_close(conn_id: u32)` - Close TCP connection
+
+**UDP Functions:**
+- `udp_connect(addr_offset: u64) -> u32` - Connect to a UDP address (returns connection ID or 0 on error)
+- `udp_send(conn_id: u32, data_offset: u64, data_len: u64) -> u32` - Send UDP datagram (returns bytes sent)
+- `udp_recv(conn_id: u32, max_len: u32) -> u64` - Receive UDP datagram (returns memory offset to data or 0)
+- `udp_close(conn_id: u32)` - Close UDP connection
+
+**ICMP Functions:**
+- `icmp_send(target_offset: u64, payload_offset: u64, payload_len: u64, seq: u16) -> u32` - Send ICMP packet (returns 1 on success, 0 on failure)
+- `icmp_recv(timeout_ms: u32) -> u64` - Receive ICMP packet (returns memory offset to JSON response or 0)
+
+All address and data parameters are memory offsets in the plugin's memory space. Use `Memory::new()` to allocate and write data, then pass the memory offset to the host functions.
+
+**Example usage in Rust:**
+```rust
+extern "C" {
+    fn tcp_connect(addr_offset: u64) -> u32;
+    fn tcp_send(conn_id: u32, data_offset: u64, data_len: u64) -> u32;
+    fn tcp_recv(conn_id: u32, max_len: u32) -> u64;
+    fn tcp_close(conn_id: u32);
+}
+
+// Connect to a target
+let addr_mem = Memory::new(&"127.0.0.1:22")?;
+let conn_id = unsafe { tcp_connect(addr_mem.offset()) };
+if conn_id > 0 {
+    // Send data
+    let data_mem = Memory::new(&data)?;
+    let bytes_sent = unsafe { tcp_send(conn_id, data_mem.offset(), data.len() as u64) };
+    // ... handle response
+    unsafe { tcp_close(conn_id); }
+}
+```
+
+See [`examples/cve-2025-3243/`](examples/cve-2025-3243/) for a complete example using raw TCP functions.
 
 ## Library Usage
 
