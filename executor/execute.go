@@ -192,17 +192,16 @@ func ExecutePlugin(ctx context.Context, req *ExecutePluginRequest) (*ExecutePlug
 	// Build result with all hashes
 	return &ExecutePluginResult{
 		Hashes: ExecutionHashes{
-			EncryptedPayloadHash:        encryptedPayloadHashHex,
-			ExploitBinaryHash:            exploitHashHex,
-			ExploitOwnerSignatureHash:    exploitSigHashHex,
-			ExploitOwnerPublicKeyHash:   exploitPubKeyHashHex,
-			TargetSignatureHash:          targetSigHashHex,
-			TargetPublicKeyHash:         targetPubKeyHashHex,
-			HarnessPublicKeyHash:        harnessPubKeyHashHex,
+			EncryptedPayloadHash:      encryptedPayloadHashHex,
+			ExploitBinaryHash:         exploitHashHex,
+			ExploitOwnerSignatureHash: exploitSigHashHex,
+			ExploitOwnerPublicKeyHash: exploitPubKeyHashHex,
+			TargetSignatureHash:       targetSigHashHex,
+			TargetPublicKeyHash:       targetPubKeyHashHex,
+			HarnessPublicKeyHash:      harnessPubKeyHashHex,
 		},
 		PluginResult: execResult,
 		PluginType:   result.Payload.Type.String(),
 		PluginName:   result.Payload.Name,
 	}, nil
 }
-

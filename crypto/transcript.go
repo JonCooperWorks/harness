@@ -162,47 +162,47 @@ func VerifyIdentityHashes(transcript []byte, expectedPkEO, expectedPkT, expected
 	// Extract identity hashes from transcript
 	// After context (length-prefixed), version (4), flags (4)
 	// Position: after context length + context bytes + 4 + 4
-	
+
 	// Read context length
 	if len(transcript) < 4 {
 		return errors.New("transcript too short for context length")
 	}
 	contextLen := int(binary.BigEndian.Uint32(transcript[0:4]))
-	
+
 	// Position after context
 	pos := 4 + contextLen
-	
+
 	// Skip version (4 bytes) and flags (4 bytes)
 	if len(transcript) < pos+8 {
 		return errors.New("transcript too short for version and flags")
 	}
 	pos += 8
-	
+
 	// Extract H(pk_EO) (32 bytes)
 	if len(transcript) < pos+32 {
 		return errors.New("transcript too short for H(pk_EO)")
 	}
 	hashEO := transcript[pos : pos+32]
 	pos += 32
-	
+
 	// Extract H(pk_T) (32 bytes)
 	if len(transcript) < pos+32 {
 		return errors.New("transcript too short for H(pk_T)")
 	}
 	hashT := transcript[pos : pos+32]
 	pos += 32
-	
+
 	// Extract H(pk_H) (32 bytes)
 	if len(transcript) < pos+32 {
 		return errors.New("transcript too short for H(pk_H)")
 	}
 	hashH := transcript[pos : pos+32]
-	
+
 	// Verify hashes match expected public keys
 	expectedHashEO := HashPublicKey(expectedPkEO)
 	expectedHashT := HashPublicKey(expectedPkT)
 	expectedHashH := HashPublicKey(expectedPkH)
-	
+
 	if !equalBytes(hashEO, expectedHashEO[:]) {
 		return fmt.Errorf("H(pk_EO) mismatch: expected %x, got %x", expectedHashEO[:], hashEO)
 	}
@@ -212,7 +212,7 @@ func VerifyIdentityHashes(transcript []byte, expectedPkEO, expectedPkT, expected
 	if !equalBytes(hashH, expectedHashH[:]) {
 		return fmt.Errorf("H(pk_H) mismatch: expected %x, got %x", expectedHashH[:], hashH)
 	}
-	
+
 	return nil
 }
 
@@ -227,4 +227,3 @@ func equalBytes(a, b []byte) bool {
 	}
 	return result == 0
 }
-

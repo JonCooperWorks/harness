@@ -88,7 +88,6 @@ func main() {
 		os.Exit(1)
 	}
 
-
 	// Verify and decrypt with hash calculation
 	verifyResult, err := crypto.VerifyAndDecryptWithHashes(po, fileData, harnessPubKey, targetPubKey, exploitPubKey)
 	if err != nil {

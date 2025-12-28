@@ -148,7 +148,7 @@ func SignEncryptedPlugin(req *SignEncryptedPluginRequest) (*SignEncryptedPluginR
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt arguments: %w", err)
 	}
-	
+
 	// Enforce max size limit for encrypted args (DoS protection)
 	if len(encryptedArgs) > MaxEncryptedArgsSize {
 		return nil, fmt.Errorf("encrypted args size %d exceeds maximum %d", len(encryptedArgs), MaxEncryptedArgsSize)

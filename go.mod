@@ -6,7 +6,6 @@ require (
 	github.com/99designs/keyring v1.2.2
 	github.com/extism/go-sdk v1.7.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
-	golang.org/x/net v0.28.0
 )
 
 require (
