@@ -36,19 +36,6 @@ func TestWASMLoader_Load_InvalidWASM(t *testing.T) {
 	}
 }
 
-// Note: Testing actual WASM plugin functionality (Name, Description, JSONSchema, Execute)
-// would require either:
-// 1. A real WASM file (which we're avoiding per the plan)
-// 2. Mocking the Extism SDK (complex)
-// 
-// For now, we test the loader creation and invalid data handling.
-// Full integration tests with actual WASM files would be in integration_test.go
-// if needed later.
-
-// The following tests verify structure but don't fully exercise WASM functionality
-// without actual WASM files. These are placeholders that demonstrate the testing
-// approach that would be used with real WASM files.
-
 func TestWASMLoader_Structure(t *testing.T) {
 	loader, err := NewWASMLoader()
 	if err != nil {
@@ -61,6 +48,24 @@ func TestWASMLoader_Structure(t *testing.T) {
 	// Verify it's not nil
 	if loader == nil {
 		t.Fatal("loader is nil")
+	}
+
+	// Test loading actual WASM file
+	plugin, err := loader.Load(testdata.HelloWorldWASM, "test-plugin")
+	if err != nil {
+		t.Fatalf("loader.Load() with real WASM error = %v", err)
+	}
+
+	if plugin == nil {
+		t.Fatal("loader.Load() returned nil plugin")
+	}
+
+	// Verify plugin implements Plugin interface
+	var _ Plugin = plugin
+
+	// Clean up
+	if wp, ok := plugin.(*WASMPlugin); ok {
+		wp.Close()
 	}
 }
 
@@ -230,4 +235,3 @@ func TestWASMPlugin_Close(t *testing.T) {
 		t.Errorf("plugin.Close() second call error = %v", err)
 	}
 }
-

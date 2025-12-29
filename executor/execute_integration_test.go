@@ -12,15 +12,6 @@ import (
 	"github.com/joncooperworks/harness/testdata"
 )
 
-// TestExecutePlugin_EndToEnd tests the full encrypt -> sign -> execute flow with a mock plugin.
-// NOTE: This test is currently disabled because it requires mock plugin functions that aren't exported.
-// The TestExecutePlugin_WASM_EndToEnd test below provides the same coverage using a real WASM plugin.
-/*
-func TestExecutePlugin_EndToEnd(t *testing.T) {
-	// ... (test code commented out - see git history)
-}
-*/
-
 func TestExecutePlugin_WASM_EndToEnd(t *testing.T) {
 	// Create all keystores
 	principalKS, err := keystore.NewMockKeystore("principal-key")
