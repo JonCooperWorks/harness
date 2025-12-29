@@ -1,7 +1,11 @@
 package plugin
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
+
+	"github.com/joncooperworks/harness/testdata"
 )
 
 func TestNewWASMLoader(t *testing.T) {
@@ -89,8 +93,141 @@ func TestWASMLoader_NilData(t *testing.T) {
 	}
 }
 
-// Note: Full WASM plugin tests (Name, Description, JSONSchema, Execute methods)
-// would require actual WASM files or extensive Extism mocking.
-// These are integration-level tests that would go in wasm_integration_test.go
-// if real WASM files are available for testing.
+// loadTestWASMPlugin loads the embedded hello-world WASM plugin for testing.
+// It returns a plugin instance that should be closed after use.
+func loadTestWASMPlugin(t *testing.T) Plugin {
+	t.Helper()
+	loader, err := NewWASMLoader()
+	if err != nil {
+		t.Fatalf("NewWASMLoader() error = %v", err)
+	}
+
+	plugin, err := loader.Load(testdata.HelloWorldWASM, "test-plugin")
+	if err != nil {
+		t.Fatalf("failed to load test WASM plugin: %v", err)
+	}
+
+	return plugin
+}
+
+// closePlugin safely closes a plugin if it implements the Close() method.
+func closePlugin(plugin Plugin) {
+	if wp, ok := plugin.(*WASMPlugin); ok {
+		wp.Close()
+	}
+}
+
+func TestWASMPlugin_Name(t *testing.T) {
+	plugin := loadTestWASMPlugin(t)
+	defer closePlugin(plugin)
+
+	name := plugin.Name()
+	if name != "hello-world-plugin" {
+		t.Errorf("plugin.Name() = %q, want %q", name, "hello-world-plugin")
+	}
+}
+
+func TestWASMPlugin_Description(t *testing.T) {
+	plugin := loadTestWASMPlugin(t)
+	defer closePlugin(plugin)
+
+	description := plugin.Description()
+	expected := "A simple hello world plugin that echoes back a greeting message"
+	if description != expected {
+		t.Errorf("plugin.Description() = %q, want %q", description, expected)
+	}
+}
+
+func TestWASMPlugin_JSONSchema(t *testing.T) {
+	plugin := loadTestWASMPlugin(t)
+	defer closePlugin(plugin)
+
+	schema := plugin.JSONSchema()
+	if len(schema) == 0 {
+		t.Error("plugin.JSONSchema() returned empty schema")
+	}
+
+	// Verify it's valid JSON
+	var schemaObj map[string]interface{}
+	if err := json.Unmarshal(schema, &schemaObj); err != nil {
+		t.Errorf("plugin.JSONSchema() returned invalid JSON: %v", err)
+	}
+
+	// Verify it has expected structure
+	if schemaObj["type"] != "object" {
+		t.Errorf("schema type = %v, want %q", schemaObj["type"], "object")
+	}
+}
+
+func TestWASMPlugin_Execute(t *testing.T) {
+	plugin := loadTestWASMPlugin(t)
+	defer closePlugin(plugin)
+
+	ctx := context.Background()
+
+	// Test with message argument
+	args := json.RawMessage(`{"message": "Hello from test"}`)
+	result, err := plugin.Execute(ctx, args)
+	if err != nil {
+		t.Fatalf("plugin.Execute() error = %v", err)
+	}
+
+	// Verify result structure
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("plugin.Execute() returned unexpected type: %T", result)
+	}
+
+	if greeting, ok := resultMap["greeting"].(string); !ok || greeting != "Hello from test" {
+		t.Errorf("result.greeting = %v, want %q", resultMap["greeting"], "Hello from test")
+	}
+
+	if pluginName, ok := resultMap["plugin"].(string); !ok || pluginName != "hello-world" {
+		t.Errorf("result.plugin = %v, want %q", resultMap["plugin"], "hello-world")
+	}
+}
+
+func TestWASMPlugin_Execute_WithoutMessage(t *testing.T) {
+	plugin := loadTestWASMPlugin(t)
+	defer closePlugin(plugin)
+
+	ctx := context.Background()
+
+	// Test without message argument (should use default)
+	args := json.RawMessage(`{}`)
+	result, err := plugin.Execute(ctx, args)
+	if err != nil {
+		t.Fatalf("plugin.Execute() error = %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("plugin.Execute() returned unexpected type: %T", result)
+	}
+
+	// Should use default message "Hello, World!"
+	if greeting, ok := resultMap["greeting"].(string); !ok || greeting != "Hello, World!" {
+		t.Errorf("result.greeting = %v, want %q", resultMap["greeting"], "Hello, World!")
+	}
+}
+
+func TestWASMPlugin_Close(t *testing.T) {
+	plugin := loadTestWASMPlugin(t)
+
+	// Type assert to WASMPlugin to access Close()
+	wp, ok := plugin.(*WASMPlugin)
+	if !ok {
+		t.Fatal("plugin is not a WASMPlugin")
+	}
+
+	// Close should not panic or error
+	if err := wp.Close(); err != nil {
+		t.Errorf("plugin.Close() error = %v", err)
+	}
+
+	// Closing again should be safe (idempotent)
+	if err := wp.Close(); err != nil {
+		t.Errorf("plugin.Close() second call error = %v", err)
+	}
+}
 

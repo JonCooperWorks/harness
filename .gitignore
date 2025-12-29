@@ -35,6 +35,9 @@ go.work
 *.wasm
 test-plugin.txt
 
+# Allow test WASM files (exception must come after *.wasm)
+!testdata/*.wasm
+
 # Rust build artifacts
 **/target/
 **/Cargo.lock

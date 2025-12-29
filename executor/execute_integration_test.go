@@ -9,19 +9,23 @@ import (
 
 	"github.com/joncooperworks/harness/crypto"
 	"github.com/joncooperworks/harness/crypto/keystore"
-	"github.com/joncooperworks/harness/plugin"
+	"github.com/joncooperworks/harness/testdata"
 )
 
+// TestExecutePlugin_EndToEnd tests the full encrypt -> sign -> execute flow with a mock plugin.
+// NOTE: This test is currently disabled because it requires mock plugin functions that aren't exported.
+// The TestExecutePlugin_WASM_EndToEnd test below provides the same coverage using a real WASM plugin.
+/*
 func TestExecutePlugin_EndToEnd(t *testing.T) {
+	// ... (test code commented out - see git history)
+}
+*/
+
+func TestExecutePlugin_WASM_EndToEnd(t *testing.T) {
 	// Create all keystores
 	principalKS, err := keystore.NewMockKeystore("principal-key")
 	if err != nil {
 		t.Fatalf("failed to create principal keystore: %v", err)
-	}
-
-	clientKS, err := keystore.NewMockKeystore("client-key")
-	if err != nil {
-		t.Fatalf("failed to create client keystore: %v", err)
 	}
 
 	harnessKS, err := keystore.NewMockKeystore("harness-key")
@@ -32,11 +36,6 @@ func TestExecutePlugin_EndToEnd(t *testing.T) {
 	targetKS, err := keystore.NewMockKeystore("target-key")
 	if err != nil {
 		t.Fatalf("failed to create target keystore: %v", err)
-	}
-
-	pentesterKS, err := keystore.NewMockKeystore("pentester-key")
-	if err != nil {
-		t.Fatalf("failed to create pentester keystore: %v", err)
 	}
 
 	// Get public keys
@@ -55,32 +54,17 @@ func TestExecutePlugin_EndToEnd(t *testing.T) {
 		t.Fatalf("failed to get target public key: %v", err)
 	}
 
-	pentesterPub, err := pentesterKS.PublicKey()
-	if err != nil {
-		t.Fatalf("failed to get pentester public key: %v", err)
+	// Use real WASM plugin data
+	pluginData := testdata.HelloWorldWASM
+	if len(pluginData) == 0 {
+		t.Fatal("embedded WASM plugin data is empty")
 	}
-
-	// Register a mock plugin loader for testing
-	testType := "mock-executor-test-type"
-	mockLoader := plugin.NewMockLoader()
-	mockPlugin := plugin.NewMockPlugin(
-		"test-plugin",
-		"test plugin description",
-		[]byte(`{"type":"object","properties":{"arg":{"type":"string"}}}`),
-	)
-	mockLoader.SetPlugin("test-plugin", mockPlugin)
-	plugin.RegisterLoader(testType, func() (plugin.Loader, error) {
-		return mockLoader, nil
-	})
-
-	// Create plugin data (just metadata, since we're using mock loader)
-	pluginData := []byte("mock plugin data")
 
 	// Encrypt plugin
 	encryptReq := &crypto.EncryptPluginRequest{
 		PluginData:        bytes.NewReader(pluginData),
-		PluginType:        testType,
-		PluginName:        "test-plugin",
+		PluginType:        "wasm",
+		PluginName:        "hello-world-plugin", // Will be overridden by plugin's actual name
 		HarnessPubKey:     harnessPub,
 		TargetPubKey:      targetPub,
 		PrincipalKeystore: principalKS,
@@ -91,15 +75,16 @@ func TestExecutePlugin_EndToEnd(t *testing.T) {
 		t.Fatalf("EncryptPlugin() error = %v", err)
 	}
 
-	// Sign it
-	argsJSON := []byte(`{"arg":"value"}`)
+	// Sign it with execution arguments
+	// Note: HarnessPubKey and PentesterPubKey should be the same (harness and pentester are the same entity)
+	argsJSON := []byte(`{"message": "Hello from integration test"}`)
 	signReq := &crypto.SignEncryptedPluginRequest{
 		EncryptedData:   bytes.NewReader(encryptResult.EncryptedData),
 		ArgsJSON:        argsJSON,
 		ClientKeystore:  targetKS,
 		PrincipalPubKey: principalPub,
 		HarnessPubKey:   harnessPub,
-		PentesterPubKey: pentesterPub,
+		PentesterPubKey: harnessPub, // Same as harness - they're the same entity
 	}
 
 	signResult, err := crypto.SignEncryptedPlugin(signReq)
@@ -125,12 +110,13 @@ func TestExecutePlugin_EndToEnd(t *testing.T) {
 		t.Fatal("ExecutePlugin() returned nil result")
 	}
 
-	if result.PluginName != "test-plugin" {
-		t.Errorf("PluginName = %q, want %q", result.PluginName, "test-plugin")
+	// Verify plugin name matches the actual WASM plugin
+	if result.PluginName != "hello-world-plugin" {
+		t.Errorf("PluginName = %q, want %q", result.PluginName, "hello-world-plugin")
 	}
 
-	if result.PluginType != testType {
-		t.Errorf("PluginType = %q, want %q", result.PluginType, testType)
+	if result.PluginType != "wasm" {
+		t.Errorf("PluginType = %q, want %q", result.PluginType, "wasm")
 	}
 
 	// Verify hashes are present
@@ -162,9 +148,109 @@ func TestExecutePlugin_EndToEnd(t *testing.T) {
 		t.Errorf("HarnessPublicKeyHash length = %d, want 64", len(result.Hashes.HarnessPublicKeyHash))
 	}
 
-	// Verify plugin result is present
+	// Verify plugin result is present and contains expected data
 	if result.PluginResult == nil {
-		t.Error("PluginResult is nil")
+		t.Fatal("PluginResult is nil")
+	}
+
+	// Verify the plugin actually executed and returned the expected result
+	resultMap, ok := result.PluginResult.(map[string]interface{})
+	if !ok {
+		t.Fatalf("PluginResult is not a map, got %T", result.PluginResult)
+	}
+
+	// Verify greeting field matches our input
+	if greeting, ok := resultMap["greeting"].(string); !ok || greeting != "Hello from integration test" {
+		t.Errorf("result.greeting = %v, want %q", resultMap["greeting"], "Hello from integration test")
+	}
+
+	// Verify plugin name in result
+	if pluginName, ok := resultMap["plugin"].(string); !ok || pluginName != "hello-world" {
+		t.Errorf("result.plugin = %v, want %q", resultMap["plugin"], "hello-world")
+	}
+
+	// Verify timestamp field exists
+	if _, ok := resultMap["timestamp"]; !ok {
+		t.Error("result.timestamp field is missing")
+	}
+}
+
+func TestExecutePlugin_WASM_WithDefaultMessage(t *testing.T) {
+	// Create all keystores
+	principalKS, err := keystore.NewMockKeystore("principal-key")
+	if err != nil {
+		t.Fatalf("failed to create principal keystore: %v", err)
+	}
+
+	harnessKS, err := keystore.NewMockKeystore("harness-key")
+	if err != nil {
+		t.Fatalf("failed to create harness keystore: %v", err)
+	}
+
+	targetKS, err := keystore.NewMockKeystore("target-key")
+	if err != nil {
+		t.Fatalf("failed to create target keystore: %v", err)
+	}
+
+	// Get public keys
+	principalPub, _ := principalKS.PublicKey()
+	harnessPub, _ := harnessKS.PublicKey()
+	targetPub, _ := targetKS.PublicKey()
+
+	// Encrypt plugin
+	encryptReq := &crypto.EncryptPluginRequest{
+		PluginData:        bytes.NewReader(testdata.HelloWorldWASM),
+		PluginType:        "wasm",
+		PluginName:        "hello-world-plugin",
+		HarnessPubKey:     harnessPub,
+		TargetPubKey:      targetPub,
+		PrincipalKeystore: principalKS,
+	}
+
+	encryptResult, err := crypto.EncryptPlugin(encryptReq)
+	if err != nil {
+		t.Fatalf("EncryptPlugin() error = %v", err)
+	}
+
+	// Sign with empty args (should use default message)
+	// Note: HarnessPubKey and PentesterPubKey should be the same (harness and pentester are the same entity)
+	argsJSON := []byte(`{}`)
+	signReq := &crypto.SignEncryptedPluginRequest{
+		EncryptedData:   bytes.NewReader(encryptResult.EncryptedData),
+		ArgsJSON:        argsJSON,
+		ClientKeystore:  targetKS,
+		PrincipalPubKey: principalPub,
+		HarnessPubKey:   harnessPub,
+		PentesterPubKey: harnessPub, // Same as harness - they're the same entity
+	}
+
+	signResult, err := crypto.SignEncryptedPlugin(signReq)
+	if err != nil {
+		t.Fatalf("SignEncryptedPlugin() error = %v", err)
+	}
+
+	// Execute
+	execReq := &ExecutePluginRequest{
+		EncryptedData:   signResult.ApprovedData,
+		HarnessKeystore: harnessKS,
+		TargetPubKey:    targetPub,
+		ExploitPubKey:   principalPub,
+	}
+
+	result, err := ExecutePlugin(context.Background(), execReq)
+	if err != nil {
+		t.Fatalf("ExecutePlugin() error = %v", err)
+	}
+
+	// Verify plugin executed and used default message
+	resultMap, ok := result.PluginResult.(map[string]interface{})
+	if !ok {
+		t.Fatalf("PluginResult is not a map, got %T", result.PluginResult)
+	}
+
+	// Should use default message "Hello, World!"
+	if greeting, ok := resultMap["greeting"].(string); !ok || greeting != "Hello, World!" {
+		t.Errorf("result.greeting = %v, want %q", resultMap["greeting"], "Hello, World!")
 	}
 }
 
