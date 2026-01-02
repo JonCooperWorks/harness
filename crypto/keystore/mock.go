@@ -185,4 +185,3 @@ func (m *MockKeystore) Decrypt(ciphertext []byte, context Context) ([]byte, KeyI
 
 	return plaintext, m.keyID, nil
 }
-

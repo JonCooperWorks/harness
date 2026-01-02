@@ -332,4 +332,3 @@ func TestValidateArgs_InvalidSchemaDefinition(t *testing.T) {
 		// This is acceptable - invalid schema definitions should be caught
 	}
 }
-

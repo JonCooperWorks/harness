@@ -344,7 +344,6 @@ func TestPresidentialOrderImpl_VerifyAndDecrypt_InvalidPrincipalSig(t *testing.T
 	}
 }
 
-
 func TestDecryptAES_InvalidKeySize(t *testing.T) {
 	ciphertext := bytes.Repeat([]byte("x"), 50) // Some dummy ciphertext
 	aad := []byte("aad")
@@ -421,7 +420,7 @@ func TestDecryptAES_TooShort(t *testing.T) {
 	aad := []byte("aad")
 
 	tests := []struct {
-		name      string
+		name       string
 		ciphertext []byte
 	}{
 		{"empty", []byte{}},
@@ -537,4 +536,3 @@ func TestPresidentialOrderImpl_VerifyAndDecrypt_TooShort(t *testing.T) {
 		})
 	}
 }
-

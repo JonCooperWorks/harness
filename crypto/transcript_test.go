@@ -62,59 +62,59 @@ func TestBuildEOTranscript(t *testing.T) {
 	}
 
 	tests := []struct {
-		name            string
-		context         string
-		version         uint32
-		flags           uint32
-		metadata        []byte
+		name             string
+		context          string
+		version          uint32
+		flags            uint32
+		metadata         []byte
 		encryptedPayload []byte
 	}{
 		{
-			name:            "basic",
-			context:         "harness-payload-signature-v1",
-			version:         2,
-			flags:           0,
-			metadata:        []byte(`{"test":"metadata"}`),
+			name:             "basic",
+			context:          "harness-payload-signature-v1",
+			version:          2,
+			flags:            0,
+			metadata:         []byte(`{"test":"metadata"}`),
 			encryptedPayload: []byte("encrypted payload data"),
 		},
 		{
-			name:            "empty metadata",
-			context:         "harness-payload-signature-v1",
-			version:         2,
-			flags:           0,
-			metadata:        []byte{},
+			name:             "empty metadata",
+			context:          "harness-payload-signature-v1",
+			version:          2,
+			flags:            0,
+			metadata:         []byte{},
 			encryptedPayload: []byte("encrypted payload"),
 		},
 		{
-			name:            "empty payload",
-			context:         "harness-payload-signature-v1",
-			version:         2,
-			flags:           0,
-			metadata:        []byte(`{"test":"metadata"}`),
+			name:             "empty payload",
+			context:          "harness-payload-signature-v1",
+			version:          2,
+			flags:            0,
+			metadata:         []byte(`{"test":"metadata"}`),
 			encryptedPayload: []byte{},
 		},
 		{
-			name:            "large payload",
-			context:         "harness-payload-signature-v1",
-			version:         2,
-			flags:           0,
-			metadata:        []byte(`{"test":"metadata"}`),
+			name:             "large payload",
+			context:          "harness-payload-signature-v1",
+			version:          2,
+			flags:            0,
+			metadata:         []byte(`{"test":"metadata"}`),
 			encryptedPayload: make([]byte, 10000),
 		},
 		{
-			name:            "different version",
-			context:         "harness-payload-signature-v1",
-			version:         3,
-			flags:           0,
-			metadata:        []byte(`{"test":"metadata"}`),
+			name:             "different version",
+			context:          "harness-payload-signature-v1",
+			version:          3,
+			flags:            0,
+			metadata:         []byte(`{"test":"metadata"}`),
 			encryptedPayload: []byte("payload"),
 		},
 		{
-			name:            "non-zero flags",
-			context:         "harness-payload-signature-v1",
-			version:         2,
-			flags:           0xFF,
-			metadata:        []byte(`{"test":"metadata"}`),
+			name:             "non-zero flags",
+			context:          "harness-payload-signature-v1",
+			version:          2,
+			flags:            0xFF,
+			metadata:         []byte(`{"test":"metadata"}`),
 			encryptedPayload: []byte("payload"),
 		},
 	}
@@ -279,67 +279,67 @@ func TestBuildTargetTranscript(t *testing.T) {
 	}
 
 	tests := []struct {
-		name            string
-		context         string
-		version         uint32
-		flags           uint32
+		name             string
+		context          string
+		version          uint32
+		flags            uint32
 		encryptedPayload []byte
-		encryptedArgs   []byte
-		expiration      int64
+		encryptedArgs    []byte
+		expiration       int64
 	}{
 		{
-			name:            "basic",
-			context:         "harness-client-signature-v1",
-			version:         2,
-			flags:           0,
+			name:             "basic",
+			context:          "harness-client-signature-v1",
+			version:          2,
+			flags:            0,
 			encryptedPayload: []byte("encrypted payload"),
-			encryptedArgs:   []byte(`{"arg":"value"}`),
-			expiration:      1234567890,
+			encryptedArgs:    []byte(`{"arg":"value"}`),
+			expiration:       1234567890,
 		},
 		{
-			name:            "empty payload",
-			context:         "harness-client-signature-v1",
-			version:         2,
-			flags:           0,
+			name:             "empty payload",
+			context:          "harness-client-signature-v1",
+			version:          2,
+			flags:            0,
 			encryptedPayload: []byte{},
-			encryptedArgs:   []byte(`{}`),
-			expiration:      1234567890,
+			encryptedArgs:    []byte(`{}`),
+			expiration:       1234567890,
 		},
 		{
-			name:            "empty args",
-			context:         "harness-client-signature-v1",
-			version:         2,
-			flags:           0,
+			name:             "empty args",
+			context:          "harness-client-signature-v1",
+			version:          2,
+			flags:            0,
 			encryptedPayload: []byte("payload"),
-			encryptedArgs:   []byte{},
-			expiration:      1234567890,
+			encryptedArgs:    []byte{},
+			expiration:       1234567890,
 		},
 		{
-			name:            "large args",
-			context:         "harness-client-signature-v1",
-			version:         2,
-			flags:           0,
+			name:             "large args",
+			context:          "harness-client-signature-v1",
+			version:          2,
+			flags:            0,
 			encryptedPayload: []byte("payload"),
-			encryptedArgs:   make([]byte, 5000),
-			expiration:      1234567890,
+			encryptedArgs:    make([]byte, 5000),
+			expiration:       1234567890,
 		},
 		{
-			name:            "zero expiration",
-			context:         "harness-client-signature-v1",
-			version:         2,
-			flags:           0,
+			name:             "zero expiration",
+			context:          "harness-client-signature-v1",
+			version:          2,
+			flags:            0,
 			encryptedPayload: []byte("payload"),
-			encryptedArgs:   []byte(`{}`),
-			expiration:      0,
+			encryptedArgs:    []byte(`{}`),
+			expiration:       0,
 		},
 		{
-			name:            "future expiration",
-			context:         "harness-client-signature-v1",
-			version:         2,
-			flags:           0,
+			name:             "future expiration",
+			context:          "harness-client-signature-v1",
+			version:          2,
+			flags:            0,
 			encryptedPayload: []byte("payload"),
-			encryptedArgs:   []byte(`{}`),
-			expiration:      9999999999,
+			encryptedArgs:    []byte(`{}`),
+			expiration:       9999999999,
 		},
 	}
 
@@ -528,14 +528,14 @@ func TestVerifyIdentityHashes_InvalidTranscript(t *testing.T) {
 	pkH, _, _ := ed25519.GenerateKey(rand.Reader)
 
 	tests := []struct {
-		name      string
+		name       string
 		transcript []byte
 	}{
 		{"empty transcript", []byte{}},
 		{"too short for context length", []byte{0, 0, 0}},
 		{"too short for version/flags", []byte{0, 0, 0, 5, 'h', 'e', 'l', 'l', 'o'}},
 		{"too short for first hash", []byte{0, 0, 0, 5, 'h', 'e', 'l', 'l', 'o', 0, 0, 0, 2, 0, 0, 0, 0}},
-		{"too short for second hash", make([]byte, 4+5+8+32)}, // context+version+flags+first hash
+		{"too short for second hash", make([]byte, 4+5+8+32)},   // context+version+flags+first hash
 		{"too short for third hash", make([]byte, 4+5+8+32+32)}, // context+version+flags+first two hashes
 	}
 
@@ -548,4 +548,3 @@ func TestVerifyIdentityHashes_InvalidTranscript(t *testing.T) {
 		})
 	}
 }
-

@@ -432,4 +432,3 @@ func TestEncryptPlugin_LargePlugin(t *testing.T) {
 		t.Error("EncryptPlugin() returned empty encrypted data")
 	}
 }
-

@@ -504,4 +504,3 @@ func TestSignEncryptedPlugin_LargeArgs(t *testing.T) {
 		// This is acceptable - the test verifies size limits are enforced
 	}
 }
-

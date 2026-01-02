@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 package crypto
@@ -334,4 +335,3 @@ func TestEncryptSignVerifyDecrypt_SignatureTampering(t *testing.T) {
 		t.Error("VerifyAndDecrypt() with tampered data error = nil, want error")
 	}
 }
-

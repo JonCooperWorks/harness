@@ -289,4 +289,3 @@ func TestGetLoaderFactory_MultipleTypes(t *testing.T) {
 		}
 	}
 }
-

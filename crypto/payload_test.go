@@ -116,4 +116,3 @@ func TestPluginTypeString_Roundtrip(t *testing.T) {
 		})
 	}
 }
-

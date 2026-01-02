@@ -49,12 +49,12 @@ func TestExecutePlugin_InvalidKeys(t *testing.T) {
 	exploitPub, _, _ := ed25519.GenerateKey(rand.Reader)
 
 	tests := []struct {
-		name           string
-		harnessKS      keystore.Keystore
-		targetPub      ed25519.PublicKey
-		exploitPub     ed25519.PublicKey
-		encryptedData  []byte
-		errMsg         string
+		name          string
+		harnessKS     keystore.Keystore
+		targetPub     ed25519.PublicKey
+		exploitPub    ed25519.PublicKey
+		encryptedData []byte
+		errMsg        string
 	}{
 		{
 			name:          "nil harness keystore",
@@ -102,4 +102,3 @@ func TestExecutePlugin_InvalidKeys(t *testing.T) {
 		})
 	}
 }
-

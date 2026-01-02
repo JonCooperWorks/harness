@@ -1,3 +1,4 @@
+//go:build integration
 // +build integration
 
 package executor
@@ -244,4 +245,3 @@ func TestExecutePlugin_WASM_WithDefaultMessage(t *testing.T) {
 		t.Errorf("result.greeting = %v, want %q", resultMap["greeting"], "Hello, World!")
 	}
 }
-

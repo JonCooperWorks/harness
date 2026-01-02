@@ -295,4 +295,3 @@ func TestEnvelopeCipher_WrongRecipient(t *testing.T) {
 		t.Error("DecryptFromPeer() with wrong recipient should have failed")
 	}
 }
-

@@ -57,4 +57,3 @@ func (m *MockPlugin) Execute(ctx context.Context, args json.RawMessage) (interfa
 	}
 	return map[string]interface{}{"result": "success"}, nil
 }
-

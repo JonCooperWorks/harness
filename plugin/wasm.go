@@ -513,10 +513,10 @@ func newICMPSendFunction() extism.HostFunction {
 	fn := extism.NewHostFunctionWithStack(
 		"icmp_send",
 		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
-			targetOffset := stack[0]     // i64
-			payloadOffset := stack[1]    // i64
-			payloadLen := stack[2]       // i64
-			seq := uint16(stack[3])     // i32 (as u16)
+			targetOffset := stack[0]  // i64
+			payloadOffset := stack[1] // i64
+			payloadLen := stack[2]    // i64
+			seq := uint16(stack[3])   // i32 (as u16)
 
 			// Read target address from plugin memory
 			target, err := p.ReadString(targetOffset)
