@@ -1,5 +1,5 @@
 [package]
-name = "cve-2025-3243-plugin"
+name = "udp-example-plugin"
 version = "0.1.0"
 edition = "2021"
 

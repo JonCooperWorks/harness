@@ -79,7 +79,7 @@ WASM is the default execution environment. Plugins can be written in any languag
 | Example | Directory | Description |
 |---------|-----------|-------------|
 | cve-2025-55182 | [`examples/cve-2025-55182/`](examples/cve-2025-55182/) | Next.js/React.js prototype pollution and command injection exploit |
-| cve-2025-3243  | [`examples/cve-2025-3243/`](examples/cve-2025-3243/)  | SSH pre-auth channel request with Erlang RCE payload (uses raw TCP host functions) |
+| cve-2025-3243  | [`examples/cve-2025-3243/`](examples/cve-2025-3243/)  | SSH pre-auth channel request with Erlang RCE payload (uses `std::net::TcpStream` polyfill) |
 | get-ip         | [`examples/get-ip/`](examples/get-ip/)                 | Simple HTTP request example |
 | hello-world    | [`examples/hello-world/`](examples/hello-world/)       | Basic plugin template |
 
@@ -101,13 +101,45 @@ The harness provides raw network socket host functions to WASM plugins, enabling
 - `udp_recv(conn_id: u32, max_len: u32) -> u64` - Receive UDP datagram (returns memory offset to data or 0)
 - `udp_close(conn_id: u32)` - Close UDP connection
 
+**Using the Rust std::net Polyfill**
+
+For Rust plugins, we provide a polyfill that wraps these raw host functions to provide a standard `std::net::TcpStream` and `std::net::UdpSocket` API. This makes it easier to write networking code using familiar Rust APIs:
+
+```rust
+use harness_wasi_sockets::{TcpStream, UdpSocket};
+use std::io::{Read, Write};
+
+// TCP example
+let mut stream = TcpStream::connect("127.0.0.1:6000")?;
+stream.write_all(b"Hello")?;
+let mut buf = [0u8; 1024];
+let n = stream.read(&mut buf)?;
+
+// UDP example
+let socket = UdpSocket::connect("127.0.0.1:6000")?;
+socket.send(b"Hello, UDP!")?;
+let mut buf = [0u8; 1024];
+let (n, addr) = socket.recv_from(&mut buf)?;
+```
+
+Add the polyfill to your `Cargo.toml`:
+
+```toml
+[dependencies]
+harness-wasi-sockets = { path = "../../polyfill" }
+```
+
+See [`polyfill/README.md`](polyfill/README.md) for complete documentation.
+
 **ICMP Functions:**
 - `icmp_send(target_offset: u64, payload_offset: u64, payload_len: u64, seq: u16) -> u32` - Send ICMP packet (returns 1 on success, 0 on failure)
 - `icmp_recv(timeout_ms: u32) -> u64` - Receive ICMP packet (returns memory offset to JSON response or 0)
 
 All address and data parameters are memory offsets in the plugin's memory space. Use `Memory::new()` to allocate and write data, then pass the memory offset to the host functions.
 
-**Example usage in Rust:**
+**Note:** For Rust plugins, we recommend using the [`harness-wasi-sockets` polyfill](polyfill/README.md) instead of calling these raw functions directly. The polyfill provides a standard `std::net::TcpStream` and `std::net::UdpSocket` API that's easier to use and maintain.
+
+**Example usage with raw host functions (not recommended for Rust):**
 ```rust
 extern "C" {
     fn tcp_connect(addr_offset: u64) -> u32;
