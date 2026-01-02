@@ -80,6 +80,7 @@ WASM is the default execution environment. Plugins can be written in any languag
 |---------|-----------|-------------|
 | cve-2025-55182 | [`examples/cve-2025-55182/`](examples/cve-2025-55182/) | Next.js/React.js prototype pollution and command injection exploit |
 | cve-2025-3243  | [`examples/cve-2025-3243/`](examples/cve-2025-3243/)  | SSH pre-auth channel request with Erlang RCE payload (uses `std::net::TcpStream` polyfill) |
+| udp-example    | [`examples/udp-example/`](examples/udp-example/)     | UDP networking example demonstrating `std::net::UdpSocket` polyfill |
 | get-ip         | [`examples/get-ip/`](examples/get-ip/)                 | Simple HTTP request example |
 | hello-world    | [`examples/hello-world/`](examples/hello-world/)       | Basic plugin template |
 
@@ -160,7 +161,7 @@ if conn_id > 0 {
 }
 ```
 
-See [`examples/cve-2025-3243/`](examples/cve-2025-3243/) for a complete example using raw TCP functions.
+See [`examples/cve-2025-3243/`](examples/cve-2025-3243/) for a complete TCP example using the polyfill, and [`examples/udp-example/`](examples/udp-example/) for a UDP example.
 
 ## Library Usage
 
