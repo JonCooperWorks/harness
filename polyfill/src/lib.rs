@@ -87,6 +87,18 @@ extern "C" {
     // udp_close(conn_id: u32)
     // Closes a UDP connection.
     fn udp_close(conn_id: u32);
+    
+    // ICMP functions - imported from "env" namespace
+    // icmp_send(target_offset: u64, payload_offset: u64, payload_len: u64, seq: u16) -> u32
+    // Sends an ICMP packet.
+    // Returns 1 on success, 0 on failure.
+    fn icmp_send(target_offset: u64, payload_offset: u64, payload_len: u64, seq: u32) -> u32;
+    
+    // icmp_recv(timeout_ms: u32) -> u64
+    // Receives an ICMP packet.
+    // Returns memory offset to JSON response (non-zero) on success, 0 on error.
+    // The JSON is written to plugin memory by the host.
+    fn icmp_recv(timeout_ms: u32) -> u64;
 }
 
 /// A TCP stream between a local and a remote socket.
@@ -526,6 +538,205 @@ impl Drop for UdpSocket {
         unsafe {
             udp_close(self.conn_id);
         }
+    }
+}
+
+/// ICMP packet sender and receiver.
+///
+/// This polyfill provides ICMP functionality for WASM plugins by wrapping the harness host's ICMP functions.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use harness_wasi_sockets::IcmpSocket;
+///
+/// // Send an ICMP echo request
+/// let socket = IcmpSocket::new();
+/// socket.send("8.8.8.8", b"Hello", 1)?;
+///
+/// // Receive ICMP response
+/// let response = socket.recv(5000)?;
+/// println!("Received from {}: type={}, code={}", response.source, response.icmp_type, response.code);
+/// ```
+pub struct IcmpSocket;
+
+/// ICMP packet response.
+#[derive(Debug, Clone)]
+pub struct IcmpResponse {
+    /// Source address of the ICMP packet
+    pub source: String,
+    /// ICMP type
+    pub icmp_type: u8,
+    /// ICMP code
+    pub code: u8,
+    /// ICMP echo ID (if echo packet)
+    pub id: Option<u16>,
+    /// ICMP echo sequence number (if echo packet)
+    pub seq: Option<u16>,
+    /// ICMP payload data
+    pub data: Vec<u8>,
+}
+
+impl IcmpSocket {
+    /// Creates a new ICMP socket.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::IcmpSocket;
+    ///
+    /// let socket = IcmpSocket::new();
+    /// ```
+    pub fn new() -> Self {
+        IcmpSocket
+    }
+
+    /// Sends an ICMP echo request packet.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - Target IP address (e.g., "8.8.8.8")
+    /// * `payload` - Payload data to send
+    /// * `seq` - Sequence number for the ICMP packet
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The target address is invalid
+    /// - The packet cannot be sent
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::IcmpSocket;
+    ///
+    /// let socket = IcmpSocket::new();
+    /// socket.send("8.8.8.8", b"Hello", 1)?;
+    /// ```
+    pub fn send(&self, target: &str, payload: &[u8], seq: u16) -> io::Result<()> {
+        use extism_pdk::Memory;
+
+        // Write target address to memory
+        let target_mem = Memory::new(target).map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("Failed to allocate memory for target: {}", e))
+        })?;
+
+        // Write payload to memory
+        let payload_mem = Memory::new(payload).map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("Failed to allocate memory for payload: {}", e))
+        })?;
+
+        let result = unsafe {
+            icmp_send(
+                target_mem.offset(),
+                payload_mem.offset(),
+                payload.len() as u64,
+                seq as u32,
+            )
+        };
+
+        if result == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to send ICMP packet to {}", target),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Receives an ICMP packet.
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout_ms` - Timeout in milliseconds
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The timeout expires
+    /// - The packet cannot be received
+    /// - The response cannot be parsed
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::IcmpSocket;
+    ///
+    /// let socket = IcmpSocket::new();
+    /// let response = socket.recv(5000)?;
+    /// ```
+    pub fn recv(&self, timeout_ms: u32) -> io::Result<IcmpResponse> {
+        use extism_pdk::Memory;
+
+        let json_offset = unsafe { icmp_recv(timeout_ms) };
+        if json_offset == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "ICMP receive timeout or error",
+            ));
+        }
+
+        // Read JSON from plugin memory
+        let mem = Memory::find(json_offset).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "Failed to find memory for ICMP response")
+        })?;
+
+        let json_bytes = mem.to_vec();
+        let json_str = String::from_utf8(json_bytes).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8 in ICMP response: {}", e))
+        })?;
+
+        // Parse JSON response
+        // The host returns: {"source": "...", "type": 0, "code": 0, "id": 1, "seq": 1, "data": [...]}
+        use serde_json::Value;
+        let json: Value = serde_json::from_str(&json_str).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("Failed to parse ICMP response JSON: {}", e))
+        })?;
+
+        let source = json["source"]
+            .as_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Missing 'source' in ICMP response"))?
+            .to_string();
+
+        let icmp_type = json["type"]
+            .as_u64()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Missing 'type' in ICMP response"))?
+            as u8;
+
+        let code = json["code"]
+            .as_u64()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Missing 'code' in ICMP response"))?
+            as u8;
+
+        let id = json["id"].as_u64().map(|v| v as u16);
+        let seq = json["seq"].as_u64().map(|v| v as u16);
+
+        let data = if let Some(data_array) = json["data"].as_array() {
+            data_array
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u8))
+                .collect()
+        } else if let Some(data_str) = json["data"].as_str() {
+            data_str.as_bytes().to_vec()
+        } else {
+            Vec::new()
+        };
+
+        Ok(IcmpResponse {
+            source,
+            icmp_type,
+            code,
+            id,
+            seq,
+            data,
+        })
+    }
+}
+
+impl Default for IcmpSocket {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

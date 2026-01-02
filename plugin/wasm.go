@@ -8,6 +8,8 @@ import (
 	"time"
 
 	extism "github.com/extism/go-sdk"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
 )
 
 func init() {
@@ -51,6 +53,9 @@ func (wl *WASMLoader) Load(data []byte, name string) (Plugin, error) {
 		newUDPSendFunction(),
 		newUDPRecvFunction(),
 		newUDPCloseFunction(),
+		// ICMP functions - imported from "env" module
+		newICMPSendFunction(),
+		newICMPRecvFunction(),
 	}
 
 	plugin, err := extism.NewPlugin(ctx, manifest, config, hostFunctions)
@@ -497,6 +502,183 @@ func newUDPCloseFunction() extism.HostFunction {
 		},
 		[]extism.ValueType{extism.ValueTypeI32}, // conn_id: i32
 		[]extism.ValueType{},                    // void
+	)
+	fn.SetNamespace("env")
+	return fn
+}
+
+// newICMPSendFunction creates a host function for sending ICMP packets.
+// WASM signature: (param i64 i64 i64 i32) (result i32) - target_offset, payload_offset, payload_len, seq -> success
+func newICMPSendFunction() extism.HostFunction {
+	fn := extism.NewHostFunctionWithStack(
+		"icmp_send",
+		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+			targetOffset := stack[0]     // i64
+			payloadOffset := stack[1]    // i64
+			payloadLen := stack[2]       // i64
+			seq := uint16(stack[3])     // i32 (as u16)
+
+			// Read target address from plugin memory
+			target, err := p.ReadString(targetOffset)
+			if err != nil {
+				stack[0] = 0 // Return 0 on error
+				p.Log(extism.LogLevelError, fmt.Sprintf("icmp_send: failed to read target: %v", err))
+				return
+			}
+
+			// Read payload from plugin memory
+			payload, err := p.ReadBytes(payloadOffset)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("icmp_send: failed to read payload: %v", err))
+				return
+			}
+
+			// Limit to requested length
+			if uint64(len(payload)) > payloadLen {
+				payload = payload[:payloadLen]
+			}
+
+			// Resolve target IP address
+			ipAddr, err := net.ResolveIPAddr("ip", target)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("icmp_send: failed to resolve target %s: %v", target, err))
+				return
+			}
+
+			// Create ICMP packet
+			// ICMP Echo Request: Type 8, Code 0
+			icmpMsg := &icmp.Message{
+				Type: ipv4.ICMPTypeEcho,
+				Code: 0,
+				Body: &icmp.Echo{
+					ID:   1,
+					Seq:  int(seq),
+					Data: payload,
+				},
+			}
+
+			// Marshal ICMP message
+			icmpBytes, err := icmpMsg.Marshal(nil)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("icmp_send: failed to marshal ICMP message: %v", err))
+				return
+			}
+
+			// Send ICMP packet
+			conn, err := net.DialIP("ip4:icmp", nil, ipAddr)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("icmp_send: failed to dial ICMP: %v", err))
+				return
+			}
+			defer conn.Close()
+
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			_, err = conn.Write(icmpBytes)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("icmp_send: failed to send ICMP packet: %v", err))
+				return
+			}
+
+			stack[0] = 1 // Return 1 on success
+			p.Log(extism.LogLevelInfo, fmt.Sprintf("icmp_send: sent ICMP packet to %s (seq=%d, payload_len=%d)", target, seq, len(payload)))
+		},
+		[]extism.ValueType{extism.ValueTypeI64, extism.ValueTypeI64, extism.ValueTypeI64, extism.ValueTypeI32}, // target_offset, payload_offset, payload_len, seq
+		[]extism.ValueType{extism.ValueTypeI32}, // success: i32 (1 or 0)
+	)
+	fn.SetNamespace("env")
+	return fn
+}
+
+// newICMPRecvFunction creates a host function for receiving ICMP packets.
+// WASM signature: (param i32) (result i64) - timeout_ms -> json_offset
+func newICMPRecvFunction() extism.HostFunction {
+	fn := extism.NewHostFunctionWithStack(
+		"icmp_recv",
+		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+			timeoutMs := uint32(stack[0]) // i32
+
+			// Create a raw ICMP socket to receive packets
+			conn, err := net.ListenPacket("ip4:icmp", "0.0.0.0")
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("icmp_recv: failed to listen: %v", err))
+				return
+			}
+			defer conn.Close()
+
+			// Set read deadline
+			timeout := time.Duration(timeoutMs) * time.Millisecond
+			conn.SetReadDeadline(time.Now().Add(timeout))
+
+			// Read ICMP packet
+			buf := make([]byte, 1500)
+			n, addr, err := conn.ReadFrom(buf)
+			if err != nil {
+				// Check if it's a timeout (which might be expected)
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					stack[0] = 0
+					return
+				}
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("icmp_recv: failed to receive: %v", err))
+				return
+			}
+
+			// Parse ICMP message (protocol 1 = ICMP)
+			msg, err := icmp.ParseMessage(1, buf[:n])
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("icmp_recv: failed to parse ICMP message: %v", err))
+				return
+			}
+
+			// Build JSON response
+			icmpType := 0
+			if t, ok := msg.Type.(ipv4.ICMPType); ok {
+				icmpType = int(t)
+			}
+			response := map[string]interface{}{
+				"source": addr.String(),
+				"type":   icmpType,
+				"code":   msg.Code,
+			}
+
+			// Extract payload if it's an echo reply
+			if echo, ok := msg.Body.(*icmp.Echo); ok {
+				response["id"] = echo.ID
+				response["seq"] = echo.Seq
+				response["data"] = echo.Data
+			} else {
+				// For other ICMP types, include raw body data if available
+				response["data"] = []byte{}
+			}
+
+			// Marshal to JSON
+			jsonBytes, err := json.Marshal(response)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("icmp_recv: failed to marshal JSON: %v", err))
+				return
+			}
+
+			// Write JSON to plugin memory
+			jsonOffset, err := p.WriteBytes(jsonBytes)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("icmp_recv: failed to write JSON to plugin memory: %v", err))
+				return
+			}
+
+			stack[0] = jsonOffset // Return i64 offset
+			p.Log(extism.LogLevelInfo, fmt.Sprintf("icmp_recv: received ICMP packet from %s (type=%d, code=%d)", addr, msg.Type, msg.Code))
+		},
+		[]extism.ValueType{extism.ValueTypeI32}, // timeout_ms: i32
+		[]extism.ValueType{extism.ValueTypeI64}, // json_offset: i64
 	)
 	fn.SetNamespace("env")
 	return fn

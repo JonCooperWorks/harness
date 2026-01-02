@@ -1,6 +1,6 @@
 # Rust std::net Polyfill for WASM Plugins
 
-This polyfill provides `std::net::TcpStream` and `std::net::UdpSocket`-compatible functionality for WASM plugins running in the harness system. It wraps the harness host's TCP and UDP functions to provide a standard Rust networking API.
+This polyfill provides `std::net::TcpStream`, `std::net::UdpSocket`, and ICMP functionality for WASM plugins running in the harness system. It wraps the harness host's TCP, UDP, and ICMP functions to provide a standard Rust networking API.
 
 ## Features
 
@@ -8,7 +8,7 @@ This polyfill provides `std::net::TcpStream` and `std::net::UdpSocket`-compatibl
 - **Standard Rust API** - implements `Read`, `Write`, and standard networking methods
 - **Automatic connection management** - connections are closed on drop
 - **Buffered reading** - efficiently handles partial reads and data buffering
-- **TCP and UDP support** - both protocols are fully supported
+- **TCP, UDP, and ICMP support** - all three protocols are fully supported
 
 ## Usage
 
@@ -56,6 +56,25 @@ socket.send(b"Hello, UDP!")?;
 let mut buf = [0u8; 1024];
 let (n, addr) = socket.recv_from(&mut buf)?;
 println!("Received {} bytes from {}", n, addr);
+```
+
+### ICMP Example
+
+```rust
+use harness_wasi_sockets::IcmpSocket;
+
+// Create an ICMP socket
+let socket = IcmpSocket::new();
+
+// Send an ICMP echo request
+socket.send("8.8.8.8", b"Hello, ICMP!", 1)?;
+
+// Receive ICMP response
+let response = socket.recv(5000)?;
+println!("Received from {}: type={}, code={}", response.source, response.icmp_type, response.code);
+if let Some(seq) = response.seq {
+    println!("Sequence number: {}", seq);
+}
 ```
 
 ## API
@@ -119,6 +138,34 @@ Returns the socket address of the remote peer this socket was connected to.
 
 Returns the socket address of the local half. **Not yet implemented** - returns an error.
 
+## ICMP API
+
+### `IcmpSocket::new() -> IcmpSocket`
+
+Creates a new ICMP socket for sending and receiving ICMP packets.
+
+### `IcmpSocket::send(&self, target: &str, payload: &[u8], seq: u16) -> io::Result<()>`
+
+Sends an ICMP echo request packet to the specified target.
+
+- `target` - Target IP address (e.g., "8.8.8.8")
+- `payload` - Payload data to send in the ICMP packet
+- `seq` - Sequence number for the ICMP packet
+
+### `IcmpSocket::recv(&self, timeout_ms: u32) -> io::Result<IcmpResponse>`
+
+Receives an ICMP packet with the specified timeout.
+
+- `timeout_ms` - Timeout in milliseconds
+
+Returns an `IcmpResponse` containing:
+- `source` - Source address of the ICMP packet
+- `icmp_type` - ICMP type
+- `code` - ICMP code
+- `id` - ICMP echo ID (if echo packet)
+- `seq` - ICMP echo sequence number (if echo packet)
+- `data` - ICMP payload data
+
 ## How It Works
 
 The polyfill wraps the harness host's TCP and UDP functions:
@@ -155,6 +202,17 @@ The polyfill wraps the harness host's TCP and UDP functions:
 
 4. **`udp_close(conn_id: u32)`** - Closes the connection
 
+### ICMP Functions
+
+1. **`icmp_send(target_offset: u64, payload_offset: u64, payload_len: u64, seq: u16) -> u32`** - Sends an ICMP packet
+   - Takes pointer to target address string, pointer to payload data, payload length, and sequence number
+   - Returns 1 on success, 0 on failure
+
+2. **`icmp_recv(timeout_ms: u32) -> u64`** - Receives an ICMP packet
+   - Takes timeout in milliseconds
+   - Returns memory offset to JSON response (0 if timeout or error)
+   - The JSON contains: `{"source": "...", "type": 0, "code": 0, "id": 1, "seq": 1, "data": [...]}`
+
 The polyfill uses Extism's `Memory` API to allocate and manage memory for addresses and data, ensuring compatibility with the harness host's memory model.
 
 ## Limitations
@@ -164,6 +222,8 @@ The polyfill uses Extism's `Memory` API to allocate and manage memory for addres
 - **Partial shutdown** - TCP `shutdown()` currently closes the entire connection
 - **Non-blocking I/O** - All operations are blocking with timeouts handled by the host
 - **UDP connection mode** - UDP sockets must be connected via `connect()` before use (connectionless mode not supported)
+- **ICMP permissions** - ICMP operations may require elevated privileges on some systems
+- **ICMP response format** - ICMP responses are returned as JSON, not raw packets
 
 ## Migration from Raw Host Functions
 
@@ -193,6 +253,33 @@ use std::io::Write;
 let mut stream = TcpStream::connect(&target_addr)?;
 stream.write_all(&data)?;
 // Connection automatically closed on drop
+```
+
+### ICMP Example
+
+**Before:**
+```rust
+extern "C" {
+    fn icmp_send(target_offset: u64, payload_offset: u64, payload_len: u64, seq: u32) -> u32;
+    fn icmp_recv(timeout_ms: u32) -> u64;
+}
+
+// Manual memory management and JSON parsing
+let target_mem = Memory::new(&target)?;
+let payload_mem = Memory::new(&payload)?;
+let result = unsafe { icmp_send(target_mem.offset(), payload_mem.offset(), payload.len() as u64, 1) };
+// ... manual JSON parsing
+```
+
+**After:**
+```rust
+use harness_wasi_sockets::IcmpSocket;
+
+// Automatic memory management and JSON parsing
+let socket = IcmpSocket::new();
+socket.send("8.8.8.8", b"Hello", 1)?;
+let response = socket.recv(5000)?;
+// Response is automatically parsed into structured data
 ```
 
 ## Building

@@ -104,10 +104,10 @@ The harness provides raw network socket host functions to WASM plugins, enabling
 
 **Using the Rust std::net Polyfill**
 
-For Rust plugins, we provide a polyfill that wraps these raw host functions to provide a standard `std::net::TcpStream` and `std::net::UdpSocket` API. This makes it easier to write networking code using familiar Rust APIs:
+For Rust plugins, we provide a polyfill that wraps these raw host functions to provide a standard `std::net::TcpStream`, `std::net::UdpSocket`, and ICMP API. This makes it easier to write networking code using familiar Rust APIs:
 
 ```rust
-use harness_wasi_sockets::{TcpStream, UdpSocket};
+use harness_wasi_sockets::{TcpStream, UdpSocket, IcmpSocket};
 use std::io::{Read, Write};
 
 // TCP example
@@ -121,6 +121,11 @@ let socket = UdpSocket::connect("127.0.0.1:6000")?;
 socket.send(b"Hello, UDP!")?;
 let mut buf = [0u8; 1024];
 let (n, addr) = socket.recv_from(&mut buf)?;
+
+// ICMP example
+let icmp = IcmpSocket::new();
+icmp.send("8.8.8.8", b"Hello, ICMP!", 1)?;
+let response = icmp.recv(5000)?;
 ```
 
 Add the polyfill to your `Cargo.toml`:
@@ -138,7 +143,7 @@ See [`polyfill/README.md`](polyfill/README.md) for complete documentation.
 
 All address and data parameters are memory offsets in the plugin's memory space. Use `Memory::new()` to allocate and write data, then pass the memory offset to the host functions.
 
-**Note:** For Rust plugins, we recommend using the [`harness-wasi-sockets` polyfill](polyfill/README.md) instead of calling these raw functions directly. The polyfill provides a standard `std::net::TcpStream` and `std::net::UdpSocket` API that's easier to use and maintain.
+**Note:** For Rust plugins, we recommend using the [`harness-wasi-sockets` polyfill](polyfill/README.md) instead of calling these raw functions directly. The polyfill provides a standard `std::net::TcpStream`, `std::net::UdpSocket`, and ICMP API that's easier to use and maintain.
 
 **Example usage with raw host functions (not recommended for Rust):**
 ```rust
