@@ -141,6 +141,8 @@ See [`polyfill/README.md`](polyfill/README.md) for complete documentation.
 - `icmp_send(target_offset: u64, payload_offset: u64, payload_len: u64, seq: u16) -> u32` - Send ICMP packet (returns 1 on success, 0 on failure)
 - `icmp_recv(timeout_ms: u32) -> u64` - Receive ICMP packet (returns memory offset to JSON response or 0)
 
+> **Note:** ICMP functions require raw socket access, which typically requires root/administrator privileges or the `CAP_NET_RAW` capability on Linux. Without elevated privileges, ICMP operations will fail silently.
+
 All address and data parameters are memory offsets in the plugin's memory space. Use `Memory::new()` to allocate and write data, then pass the memory offset to the host functions.
 
 **Note:** For Rust plugins, we recommend using the [`harness-wasi-sockets` polyfill](polyfill/README.md) instead of calling these raw functions directly. The polyfill provides a standard `std::net::TcpStream`, `std::net::UdpSocket`, and ICMP API that's easier to use and maintain.

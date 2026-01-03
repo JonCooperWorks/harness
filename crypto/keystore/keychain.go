@@ -233,6 +233,11 @@ func (k *keychainKeystore) EncryptFor(recipientPub [32]byte, plaintext []byte, c
 	// Use context as AAD for domain separation (RFC compliance)
 	ciphertext := gcm.Seal(nil, nonce, plaintext, context)
 
+	// Zeroize sensitive key material (defense-in-depth)
+	zeroize(ephemeralX25519Private)
+	zeroize32(&sharedSecret)
+	zeroize32(&aesKey)
+
 	// Encode ephemeral X25519 public key (32 bytes)
 	ephemeralX25519PubBytes, err := Ed25519ToX25519PublicKey(ephemeralPublic)
 	if err != nil {
@@ -302,6 +307,12 @@ func (k *keychainKeystore) Decrypt(ciphertext []byte, context Context) ([]byte, 
 
 	// Decrypt and verify authentication tag (context as AAD for domain separation)
 	plaintext, err := gcm.Open(nil, nonce, data, context)
+
+	// Zeroize sensitive key material (defense-in-depth)
+	zeroize(x25519PrivateKey)
+	zeroize32(&sharedSecret)
+	zeroize32(&aesKey)
+
 	if err != nil {
 		return nil, k.keyID, fmt.Errorf("failed to decrypt: %w", err)
 	}

@@ -16,6 +16,11 @@ import (
 	"github.com/joncooperworks/harness/crypto/keystore"
 )
 
+// ExpirationSafetyMargin is the time buffer before actual expiration during which
+// execution is rejected to account for clock skew and processing time.
+// This prevents race conditions where a payload expires mid-execution.
+const ExpirationSafetyMargin = 30 * time.Second
+
 // DecryptedResult contains both the decrypted payload and the execution arguments.
 //
 // This is returned by PresidentialOrder.VerifyAndDecrypt after successfully
@@ -428,9 +433,9 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 	expirationTime := time.Unix(expirationUnix, 0)
 	pos += 8
 
-	// Verify expiration has not passed
-	if time.Now().After(expirationTime) {
-		return nil, fmt.Errorf("payload has expired: expiration was %s, current time is %s", expirationTime.Format(time.RFC3339), time.Now().Format(time.RFC3339))
+	// Verify expiration has not passed (with safety margin to prevent mid-execution expiration)
+	if time.Now().Add(ExpirationSafetyMargin).After(expirationTime) {
+		return nil, fmt.Errorf("payload has expired or is too close to expiration: expiration was %s, current time is %s (requires %v safety margin)", expirationTime.Format(time.RFC3339), time.Now().Format(time.RFC3339), ExpirationSafetyMargin)
 	}
 
 	// Read encrypted args length (validate as uint32 before casting)
@@ -504,6 +509,8 @@ func (po *PresidentialOrderImpl) VerifyAndDecrypt(fileData []byte) (*DecryptedRe
 
 	// Decrypt plugin data using AES with AAD
 	pluginData, err := decryptAES(encryptedPluginData, symmetricKey, payloadAADBytes)
+	// Zeroize symmetric key immediately after use (defense-in-depth)
+	zeroize(symmetricKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt plugin data: %w", err)
 	}

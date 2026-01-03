@@ -180,6 +180,8 @@ func EncryptPlugin(req *EncryptPluginRequest) (*EncryptPluginResult, error) {
 
 	// Encrypt symmetric key using EnvelopeCipher
 	encryptedSymmetricKey, err := enc.EncryptToPeer(harnessPubX32, hceepcrypto.ContextSymmetricKey, symmetricKey)
+	// Zeroize symmetric key immediately after use (defense-in-depth)
+	zeroize(symmetricKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt symmetric key: %w", err)
 	}

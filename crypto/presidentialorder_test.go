@@ -316,6 +316,65 @@ func TestPresidentialOrderImpl_VerifyAndDecrypt_Expired(t *testing.T) {
 	}
 }
 
+func TestPresidentialOrderImpl_VerifyAndDecrypt_ExpirationSafetyMargin(t *testing.T) {
+	// Create package that expires within the safety margin (15 seconds from now)
+	// This should be rejected because it's too close to expiration
+	principalKS, _ := keystore.NewMockKeystore("principal-key")
+	harnessKS, _ := keystore.NewMockKeystore("harness-key")
+	targetKS, _ := keystore.NewMockKeystore("target-key")
+
+	principalPub, _ := principalKS.PublicKey()
+	harnessPub, _ := harnessKS.PublicKey()
+	targetPub, _ := targetKS.PublicKey()
+
+	pluginData := []byte("test plugin binary data")
+	encryptReq := &EncryptPluginRequest{
+		PluginData:        bytes.NewReader(pluginData),
+		PluginType:        "wasm",
+		PluginName:        "test-plugin",
+		HarnessPubKey:     harnessPub,
+		TargetPubKey:      targetPub,
+		PrincipalKeystore: principalKS,
+	}
+
+	encryptResult, err := EncryptPlugin(encryptReq)
+	if err != nil {
+		t.Fatalf("EncryptPlugin() error = %v", err)
+	}
+
+	// Sign with timestamp that expires within safety margin (15 seconds from now)
+	// Since ExpirationSafetyMargin is 30 seconds, this should be rejected
+	withinSafetyMargin := time.Now().Add(15 * time.Second)
+	signReq := &SignEncryptedPluginRequest{
+		EncryptedData:   bytes.NewReader(encryptResult.EncryptedData),
+		ArgsJSON:        []byte(`{}`),
+		ClientKeystore:  targetKS,
+		PrincipalPubKey: principalPub,
+		HarnessPubKey:   harnessPub,
+		PentesterPubKey: harnessPub,
+		Expiration:      &withinSafetyMargin,
+	}
+
+	signResult, err := SignEncryptedPlugin(signReq)
+	if err != nil {
+		t.Fatalf("SignEncryptedPlugin() error = %v", err)
+	}
+
+	po, err := NewPresidentialOrderFromKeystore(harnessKS, targetPub, principalPub, harnessPub)
+	if err != nil {
+		t.Fatalf("NewPresidentialOrderFromKeystore() error = %v", err)
+	}
+
+	_, err = po.VerifyAndDecrypt(signResult.ApprovedData)
+	if err == nil {
+		t.Error("VerifyAndDecrypt() with expiration within safety margin error = nil, want error")
+		return
+	}
+	if !strings.Contains(err.Error(), "expired") && !strings.Contains(err.Error(), "close to expiration") {
+		t.Errorf("VerifyAndDecrypt() error = %v, want error containing 'expired' or 'close to expiration'", err)
+	}
+}
+
 func TestPresidentialOrderImpl_VerifyAndDecrypt_InvalidPrincipalSig(t *testing.T) {
 	signedPackage, harnessKS, targetPub, principalPub, harnessPub := createSignedPackage(t)
 

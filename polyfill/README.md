@@ -140,6 +140,8 @@ Returns the socket address of the local half. **Not yet implemented** - returns 
 
 ## ICMP API
 
+> **Note:** ICMP functions require raw socket access, which typically requires root/administrator privileges or the `CAP_NET_RAW` capability on Linux. Without elevated privileges, ICMP operations will fail silently.
+
 ### `IcmpSocket::new() -> IcmpSocket`
 
 Creates a new ICMP socket for sending and receiving ICMP packets.
@@ -222,7 +224,7 @@ The polyfill uses Extism's `Memory` API to allocate and manage memory for addres
 - **Partial shutdown** - TCP `shutdown()` currently closes the entire connection
 - **Non-blocking I/O** - All operations are blocking with timeouts handled by the host
 - **UDP connection mode** - UDP sockets must be connected via `connect()` before use (connectionless mode not supported)
-- **ICMP permissions** - ICMP operations may require elevated privileges on some systems
+- **ICMP permissions** - ICMP operations require raw socket access, which typically requires root/administrator privileges or the `CAP_NET_RAW` capability on Linux. Without elevated privileges, ICMP operations will fail silently.
 - **ICMP response format** - ICMP responses are returned as JSON, not raw packets
 
 ## Migration from Raw Host Functions

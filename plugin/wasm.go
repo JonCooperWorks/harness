@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"time"
 
@@ -78,7 +79,24 @@ type WASMPlugin struct {
 }
 
 // Close shuts down the plugin instance and releases resources.
+// It also closes any open TCP/UDP connections created by this plugin.
 func (wp *WASMPlugin) Close() error {
+	// Clean up all TCP connections
+	for connID, conn := range tcpConnections {
+		if conn != nil {
+			conn.Close()
+		}
+		delete(tcpConnections, connID)
+	}
+
+	// Clean up all UDP connections
+	for connID, conn := range udpConnections {
+		if conn != nil {
+			conn.Close()
+		}
+		delete(udpConnections, connID)
+	}
+
 	if wp.plugin != nil {
 		return wp.plugin.Close(wp.ctx)
 	}
@@ -189,8 +207,13 @@ func newTCPConnectFunction() extism.HostFunction {
 				return
 			}
 
-			// Store connection and return ID
-			tcpConnID++
+			// Store connection and return ID with overflow protection
+			// If we've reached max uint32, wrap around to 1 (0 is reserved for errors)
+			if tcpConnID == math.MaxUint32 {
+				tcpConnID = 1
+			} else {
+				tcpConnID++
+			}
 			connID := tcpConnID
 			tcpConnections[connID] = conn.(*net.TCPConn)
 			stack[0] = uint64(connID)
@@ -366,8 +389,13 @@ func newUDPConnectFunction() extism.HostFunction {
 				return
 			}
 
-			// Store connection and return ID
-			udpConnID++
+			// Store connection and return ID with overflow protection
+			// If we've reached max uint32, wrap around to 1 (0 is reserved for errors)
+			if udpConnID == math.MaxUint32 {
+				udpConnID = 1
+			} else {
+				udpConnID++
+			}
 			connID := udpConnID
 			udpConnections[connID] = conn
 			stack[0] = uint64(connID)

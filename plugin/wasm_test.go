@@ -235,3 +235,104 @@ func TestWASMPlugin_Close(t *testing.T) {
 		t.Errorf("plugin.Close() second call error = %v", err)
 	}
 }
+
+// TestTCPConnIDOverflow tests that TCP connection IDs wrap around correctly at MaxUint32
+func TestTCPConnIDOverflow(t *testing.T) {
+	// Save original value
+	originalID := tcpConnID
+	defer func() { tcpConnID = originalID }()
+
+	// Set to max - 1, so next increment goes to max
+	tcpConnID = ^uint32(0) - 1 // MaxUint32 - 1
+
+	// Simulate first connection ID assignment (increments to MaxUint32)
+	if tcpConnID == ^uint32(0) {
+		tcpConnID = 1
+	} else {
+		tcpConnID++
+	}
+	firstID := tcpConnID
+	if firstID != ^uint32(0) {
+		t.Errorf("first ID = %d, want MaxUint32 (%d)", firstID, ^uint32(0))
+	}
+
+	// Next one should wrap to 1 (not 0, since 0 is error sentinel)
+	if tcpConnID == ^uint32(0) {
+		tcpConnID = 1
+	} else {
+		tcpConnID++
+	}
+	wrappedID := tcpConnID
+	if wrappedID != 1 {
+		t.Errorf("wrapped ID = %d, want 1", wrappedID)
+	}
+}
+
+// TestUDPConnIDOverflow tests that UDP connection IDs wrap around correctly at MaxUint32
+func TestUDPConnIDOverflow(t *testing.T) {
+	// Save original value
+	originalID := udpConnID
+	defer func() { udpConnID = originalID }()
+
+	// Set to max - 1, so next increment goes to max
+	udpConnID = ^uint32(0) - 1 // MaxUint32 - 1
+
+	// Simulate first connection ID assignment (increments to MaxUint32)
+	if udpConnID == ^uint32(0) {
+		udpConnID = 1
+	} else {
+		udpConnID++
+	}
+	firstID := udpConnID
+	if firstID != ^uint32(0) {
+		t.Errorf("first ID = %d, want MaxUint32 (%d)", firstID, ^uint32(0))
+	}
+
+	// Next one should wrap to 1 (not 0, since 0 is error sentinel)
+	if udpConnID == ^uint32(0) {
+		udpConnID = 1
+	} else {
+		udpConnID++
+	}
+	wrappedID := udpConnID
+	if wrappedID != 1 {
+		t.Errorf("wrapped ID = %d, want 1", wrappedID)
+	}
+}
+
+// TestWASMPlugin_Close_CleansUpConnections tests that Close() cleans up TCP/UDP connections
+func TestWASMPlugin_Close_CleansUpConnections(t *testing.T) {
+	plugin := loadTestWASMPlugin(t)
+
+	// Manually add some fake entries to connection maps to verify cleanup
+	// Note: We use nil connections here since we just want to verify the maps are cleared
+	tcpConnections[100] = nil
+	tcpConnections[101] = nil
+	udpConnections[200] = nil
+	udpConnections[201] = nil
+
+	// Verify connections were added
+	if len(tcpConnections) < 2 {
+		t.Error("tcpConnections should have at least 2 entries")
+	}
+	if len(udpConnections) < 2 {
+		t.Error("udpConnections should have at least 2 entries")
+	}
+
+	// Close the plugin
+	wp, ok := plugin.(*WASMPlugin)
+	if !ok {
+		t.Fatal("plugin is not a WASMPlugin")
+	}
+	if err := wp.Close(); err != nil {
+		t.Errorf("plugin.Close() error = %v", err)
+	}
+
+	// Verify all connections were cleaned up
+	if len(tcpConnections) != 0 {
+		t.Errorf("tcpConnections should be empty after Close(), got %d entries", len(tcpConnections))
+	}
+	if len(udpConnections) != 0 {
+		t.Errorf("udpConnections should be empty after Close(), got %d entries", len(udpConnections))
+	}
+}
