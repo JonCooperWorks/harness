@@ -79,6 +79,7 @@ WASM is the default execution environment. Plugins can be written in any languag
 | Example | Directory | Description |
 |---------|-----------|-------------|
 | cve-2025-55182 | [`examples/cve-2025-55182/`](examples/cve-2025-55182/) | Next.js/React.js prototype pollution and command injection exploit |
+| cve-2025-54068 | [`examples/cve-2025-54068/`](examples/cve-2025-54068/) | Livewire v3 RCE via prototype pollution (CVE-2025-54068) |
 | cve-2025-3243  | [`examples/cve-2025-3243/`](examples/cve-2025-3243/)  | SSH pre-auth channel request with Erlang RCE payload (uses `std::net::TcpStream` polyfill) |
 | udp-example    | [`examples/udp-example/`](examples/udp-example/)     | UDP networking example demonstrating `std::net::UdpSocket` polyfill |
 | get-ip         | [`examples/get-ip/`](examples/get-ip/)                 | Simple HTTP request example |

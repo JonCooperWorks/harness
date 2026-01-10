@@ -38,7 +38,8 @@ func (wl *WASMLoader) Load(data []byte, name string) (Plugin, error) {
 
 	ctx := context.Background()
 	config := extism.PluginConfig{
-		EnableWasi: true,
+		EnableWasi:               true,
+		EnableHttpResponseHeaders: true,
 	}
 
 	// Register host functions for network operations

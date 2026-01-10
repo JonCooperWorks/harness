@@ -617,12 +617,12 @@ impl IcmpSocket {
         use extism_pdk::Memory;
 
         // Write target address to memory
-        let target_mem = Memory::new(target).map_err(|e| {
+        let target_mem = Memory::new(&target.to_string()).map_err(|e| {
             io::Error::new(io::ErrorKind::Other, format!("Failed to allocate memory for target: {}", e))
         })?;
 
         // Write payload to memory
-        let payload_mem = Memory::new(payload).map_err(|e| {
+        let payload_mem = Memory::new(&payload.to_vec()).map_err(|e| {
             io::Error::new(io::ErrorKind::Other, format!("Failed to allocate memory for payload: {}", e))
         })?;
 
