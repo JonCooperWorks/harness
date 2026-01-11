@@ -108,7 +108,7 @@ The harness provides raw network socket host functions to WASM plugins, enabling
 For Rust plugins, we provide a polyfill that wraps these raw host functions to provide a standard `std::net::TcpStream`, `std::net::UdpSocket`, and ICMP API. This makes it easier to write networking code using familiar Rust APIs:
 
 ```rust
-use harness_wasi_sockets::{TcpStream, UdpSocket, IcmpSocket};
+use harness_wasi_sockets::{TcpStream, UdpSocket, IcmpSocket, Client};
 use std::io::{Read, Write};
 
 // TCP example
@@ -127,6 +127,17 @@ let (n, addr) = socket.recv_from(&mut buf)?;
 let icmp = IcmpSocket::new();
 icmp.send("8.8.8.8", b"Hello, ICMP!", 1)?;
 let response = icmp.recv(5000)?;
+
+// HTTP client example
+let client = Client::new();
+let response = client.get("https://example.com").send()?;
+let body = response.text()?;
+// Properly handles all headers including multiple Set-Cookie headers
+if let Some(cookies) = response.header("Set-Cookie") {
+    for cookie in cookies {
+        println!("Cookie: {}", cookie);
+    }
+}
 ```
 
 Add the polyfill to your `Cargo.toml`:

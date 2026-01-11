@@ -1,6 +1,6 @@
 # Rust std::net Polyfill for WASM Plugins
 
-This polyfill provides `std::net::TcpStream`, `std::net::UdpSocket`, and ICMP functionality for WASM plugins running in the harness system. It wraps the harness host's TCP, UDP, and ICMP functions to provide a standard Rust networking API.
+This polyfill provides `std::net::TcpStream`, `std::net::UdpSocket`, ICMP functionality, and an HTTP client for WASM plugins running in the harness system. It wraps the harness host's TCP, UDP, ICMP, and HTTP functions to provide standard Rust networking APIs.
 
 ## Features
 
@@ -9,6 +9,7 @@ This polyfill provides `std::net::TcpStream`, `std::net::UdpSocket`, and ICMP fu
 - **Automatic connection management** - connections are closed on drop
 - **Buffered reading** - efficiently handles partial reads and data buffering
 - **TCP, UDP, and ICMP support** - all three protocols are fully supported
+- **HTTP client with reqwest-like API** - properly handles all headers including multiple `Set-Cookie` headers
 
 ## Usage
 
@@ -294,3 +295,162 @@ cargo build --target wasm32-wasip1 --release
 
 No separate build step is required - it's compiled into your plugin binary.
 
+## HTTP Client
+
+The polyfill includes an HTTP client with a reqwest-like API that uses Go's `net/http` on the host side. This properly handles all HTTP headers, including multiple `Set-Cookie` headers, which solves limitations of extism's built-in HTTP API.
+
+### Features
+
+- **Proper header handling** - All headers including multiple `Set-Cookie` headers are properly extracted
+- **Reqwest-like API** - Familiar API similar to the popular `reqwest` crate
+- **JSON support** - Built-in JSON serialization/deserialization
+- **Synchronous API** - Blocking requests for simplicity
+- **Uses Go's net/http** - Battle-tested HTTP implementation on the host side
+
+### Usage
+
+```rust
+use harness_wasi_sockets::Client;
+
+// Create a new HTTP client
+let client = Client::new();
+
+// GET request
+let response = client.get("https://example.com").send()?;
+println!("Status: {}", response.status());
+let body = response.text()?;
+
+// POST request with JSON
+use serde_json::json;
+
+let response = client.post("https://api.example.com/data")
+    .header("Authorization", "Bearer token123")
+    .json(&json!({"key": "value"}))
+    .send()?;
+
+let data: Value = response.json()?;
+
+// POST request with raw body
+let response = client.post("https://api.example.com/upload")
+    .header("Content-Type", "text/plain")
+    .body(b"Hello, world!".to_vec())
+    .send()?;
+
+// Access headers (properly handles multiple headers with same name)
+if let Some(cookies) = response.header("Set-Cookie") {
+    for cookie in cookies {
+        println!("Cookie: {}", cookie);
+    }
+}
+
+// Get all headers
+let headers = response.headers();
+for (name, values) in headers {
+    println!("{}: {:?}", name, values);
+}
+```
+
+### API Reference
+
+#### `Client`
+
+The main HTTP client type.
+
+##### Methods
+
+- **`Client::new() -> Client`** - Creates a new HTTP client
+- **`Client::get(url: &str) -> RequestBuilder`** - Creates a GET request builder
+- **`Client::post(url: &str) -> RequestBuilder`** - Creates a POST request builder
+- **`Client::put(url: &str) -> RequestBuilder`** - Creates a PUT request builder
+- **`Client::delete(url: &str) -> RequestBuilder`** - Creates a DELETE request builder
+- **`Client::patch(url: &str) -> RequestBuilder`** - Creates a PATCH request builder
+
+#### `RequestBuilder`
+
+A builder for constructing HTTP requests.
+
+##### Methods
+
+- **`header(name: &str, value: &str) -> RequestBuilder`** - Adds a header to the request
+- **`json<T: Serialize>(body: &T) -> RequestBuilder`** - Sets the request body as JSON (automatically sets `Content-Type: application/json`)
+- **`body(body: Vec<u8>) -> RequestBuilder`** - Sets the request body as raw bytes
+- **`send() -> Result<Response>`** - Sends the request and returns the response
+
+#### `Response`
+
+An HTTP response.
+
+##### Methods
+
+- **`status() -> u16`** - Returns the HTTP status code
+- **`status_is_success() -> bool`** - Returns `true` if status is 200-299
+- **`headers() -> &HeaderMap`** - Returns a reference to the header map
+- **`header(name: &str) -> Option<&Vec<String>>`** - Gets all values for a header name (case-insensitive)
+- **`text() -> Result<String>`** - Returns the response body as a string
+- **`bytes() -> &[u8]`** - Returns the response body as raw bytes
+- **`json<T: Deserialize>() -> Result<T>`** - Deserializes the response body as JSON
+
+#### `HeaderMap`
+
+A type alias for `HashMap<String, Vec<String>>` that stores multiple values per header name.
+
+This allows proper handling of headers like `Set-Cookie` that can appear multiple times in a response.
+
+### How It Works
+
+The HTTP client uses a host function that calls Go's `net/http`:
+
+1. **Request building** - The Rust code builds a request with method, URL, headers, and body
+2. **Host function call** - The request is serialized to JSON and passed to the `http_request` host function
+3. **Go net/http execution** - The host function uses Go's `net/http` to make the actual HTTP request
+4. **Response parsing** - The response (status, headers, body) is returned as JSON and parsed into Rust types
+
+This approach ensures that all headers, including multiple `Set-Cookie` headers, are properly handled by Go's battle-tested HTTP implementation.
+
+### Migration from extism-pdk HTTP API
+
+**Before (extism-pdk):**
+```rust
+use extism_pdk::*;
+
+let mut req = HttpRequest::new("https://example.com")
+    .with_method("GET")
+    .with_header("Cookie", "session=abc123");
+
+let res = http::request::<Vec<u8>>(&req, None)?;
+let body = String::from_utf8_lossy(&res.body()).to_string();
+
+// Problem: Only one Set-Cookie header is accessible
+for (key, value) in res.headers() {
+    if key.to_lowercase() == "set-cookie" {
+        // Only gets one Set-Cookie header even if server sent multiple
+    }
+}
+```
+
+**After (HTTP client polyfill):**
+```rust
+use harness_wasi_sockets::Client;
+
+let client = Client::new();
+let response = client.get("https://example.com")
+    .header("Cookie", "session=abc123")
+    .send()?;
+
+let body = response.text()?;
+
+// Solution: All Set-Cookie headers are accessible
+if let Some(cookies) = response.header("Set-Cookie") {
+    for cookie in cookies {
+        // Gets ALL Set-Cookie headers from the server
+        println!("Cookie: {}", cookie);
+    }
+}
+```
+
+### Limitations
+
+- **Synchronous only** - All requests are blocking (no async support)
+- **10 second timeout** - Requests timeout after 10 seconds
+- **Redirects are followed** - Up to 10 redirects are followed automatically (as per Go's default)
+- **Base64 body encoding** - Response bodies are base64-encoded in transport (handled transparently)

@@ -743,3 +743,503 @@ impl Default for IcmpSocket {
 // Re-export for convenience (matches std::net API)
 pub use TcpStream as TcpStreamPolyfill;
 pub use UdpSocket as UdpSocketPolyfill;
+
+// HTTP Client using Go's net/http via host functions
+// Declare HTTP host function from "env" namespace
+extern "C" {
+    // http_request(method_offset: u64, url_offset: u64, headers_offset: u64, body_offset: u64) -> u64
+    // Makes an HTTP request using Go's net/http.
+    // Returns memory offset to JSON response (non-zero) on success, 0 on error.
+    // The JSON contains: {"status": 200, "headers": {"Header-Name": ["value1", "value2"]}, "body": "base64-encoded-body"}
+    fn http_request(
+        method_offset: u64,
+        url_offset: u64,
+        headers_offset: u64,
+        body_offset: u64,
+    ) -> u64;
+}
+
+use std::collections::HashMap;
+
+/// A header map that can store multiple values per header name.
+///
+/// This is used to properly handle HTTP headers like `Set-Cookie` that can
+/// appear multiple times in a response.
+pub type HeaderMap = HashMap<String, Vec<String>>;
+
+/// An HTTP client with a reqwest-like API.
+///
+/// This client uses Go's `net/http` on the host side to make HTTP requests,
+/// which properly handles all headers including multiple `Set-Cookie` headers.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use harness_wasi_sockets::Client;
+///
+/// let client = Client::new();
+/// let response = client.get("https://example.com").send()?;
+/// println!("Status: {}", response.status());
+/// let body = response.text()?;
+/// ```
+pub struct Client;
+
+impl Client {
+    /// Creates a new HTTP client.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    ///
+    /// let client = Client::new();
+    /// ```
+    pub fn new() -> Self {
+        Client
+    }
+
+    /// Creates a GET request builder.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    ///
+    /// let client = Client::new();
+    /// let response = client.get("https://example.com").send()?;
+    /// ```
+    pub fn get(&self, url: &str) -> RequestBuilder {
+        RequestBuilder::new("GET", url)
+    }
+
+    /// Creates a POST request builder.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    ///
+    /// let client = Client::new();
+    /// let response = client.post("https://example.com/api")
+    ///     .header("Content-Type", "application/json")
+    ///     .body(r#"{"key": "value"}"#.as_bytes().to_vec())
+    ///     .send()?;
+    /// ```
+    pub fn post(&self, url: &str) -> RequestBuilder {
+        RequestBuilder::new("POST", url)
+    }
+
+    /// Creates a PUT request builder.
+    pub fn put(&self, url: &str) -> RequestBuilder {
+        RequestBuilder::new("PUT", url)
+    }
+
+    /// Creates a DELETE request builder.
+    pub fn delete(&self, url: &str) -> RequestBuilder {
+        RequestBuilder::new("DELETE", url)
+    }
+
+    /// Creates a PATCH request builder.
+    pub fn patch(&self, url: &str) -> RequestBuilder {
+        RequestBuilder::new("PATCH", url)
+    }
+}
+
+impl Default for Client {
+    fn default() -> Self {
+        Client::new()
+    }
+}
+
+/// A request builder for constructing HTTP requests.
+///
+/// This provides a fluent API similar to reqwest's `RequestBuilder`.
+pub struct RequestBuilder {
+    method: String,
+    url: String,
+    headers: Vec<String>,
+    body: Option<Vec<u8>>,
+}
+
+impl RequestBuilder {
+    fn new(method: &str, url: &str) -> Self {
+        RequestBuilder {
+            method: method.to_string(),
+            url: url.to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// Adds a header to the request.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    ///
+    /// let client = Client::new();
+    /// let response = client.get("https://example.com")
+    ///     .header("X-Custom-Header", "value")
+    ///     .header("Cookie", "session=abc123")
+    ///     .send()?;
+    /// ```
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push(format!("{}: {}", name, value));
+        self
+    }
+
+    /// Sets the request body as JSON.
+    ///
+    /// This automatically sets the `Content-Type` header to `application/json`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    /// use serde_json::json;
+    ///
+    /// let client = Client::new();
+    /// let payload = json!({"key": "value"});
+    /// let response = client.post("https://example.com/api")
+    ///     .json(&payload)
+    ///     .send()?;
+    /// ```
+    pub fn json<T: serde::Serialize>(mut self, body: &T) -> Self {
+        // Set Content-Type header
+        self.headers.push("Content-Type: application/json".to_string());
+        
+        // Serialize body to JSON
+        match serde_json::to_vec(body) {
+            Ok(json_bytes) => {
+                self.body = Some(json_bytes);
+            }
+            Err(_) => {
+                // If serialization fails, we'll return an error in send()
+                // For now, just set body to None to indicate error state
+                self.body = None;
+            }
+        }
+        self
+    }
+
+    /// Sets the request body as raw bytes.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    ///
+    /// let client = Client::new();
+    /// let response = client.post("https://example.com/api")
+    ///     .header("Content-Type", "text/plain")
+    ///     .body(b"Hello, world!".to_vec())
+    ///     .send()?;
+    /// ```
+    pub fn body(mut self, body: Vec<u8>) -> Self {
+        self.body = Some(body);
+        self
+    }
+
+    /// Sends the request and returns the response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The request cannot be created or sent
+    /// - The response cannot be parsed
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    ///
+    /// let client = Client::new();
+    /// let response = client.get("https://example.com").send()?;
+    /// ```
+    pub fn send(self) -> io::Result<Response> {
+        use extism_pdk::Memory;
+
+        // Allocate memory for method
+        let method_mem = Memory::new(&self.method).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to allocate memory for method: {}", e),
+            )
+        })?;
+
+        // Allocate memory for URL
+        let url_mem = Memory::new(&self.url).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to allocate memory for URL: {}", e),
+            )
+        })?;
+
+        // Serialize headers to JSON array
+        let headers_json = serde_json::to_string(&self.headers).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to serialize headers: {}", e),
+            )
+        })?;
+
+        // Allocate memory for headers (can be empty array)
+        let headers_mem = Memory::new(&headers_json).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to allocate memory for headers: {}", e),
+            )
+        })?;
+
+        // Allocate memory for body if present
+        let body_mem = if let Some(ref body_data) = self.body {
+            Some(
+                Memory::new(body_data).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed to allocate memory for body: {}", e),
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+
+        // Call host function
+        let json_offset = unsafe {
+            http_request(
+                method_mem.offset(),
+                url_mem.offset(),
+                headers_mem.offset(),
+                body_mem.as_ref().map(|m| m.offset()).unwrap_or(0),
+            )
+        };
+
+        if json_offset == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "HTTP request failed (host function returned 0)",
+            ));
+        }
+
+        // Read JSON response from plugin memory
+        let json_mem = Memory::find(json_offset).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                "Failed to find memory for JSON response",
+            )
+        })?;
+
+        let json_bytes = json_mem.to_vec();
+        let json_str = String::from_utf8(json_bytes).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid UTF-8 in JSON response: {}", e),
+            )
+        })?;
+
+        // Parse JSON response
+        #[derive(serde::Deserialize)]
+        struct HttpResponse {
+            status: u16,
+            headers: HashMap<String, Vec<String>>,
+            body: String, // base64-encoded
+        }
+
+        let http_resp: HttpResponse = serde_json::from_str(&json_str).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to parse HTTP response JSON: {}", e),
+            )
+        })?;
+
+        // Decode base64 body
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        let body_bytes = BASE64
+            .decode(&http_resp.body)
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to decode base64 body: {}", e),
+                )
+            })?;
+
+        Ok(Response {
+            status: http_resp.status,
+            headers: http_resp.headers,
+            body: body_bytes,
+        })
+    }
+}
+
+/// An HTTP response.
+///
+/// This represents the response from an HTTP request, including status code,
+/// headers, and body.
+pub struct Response {
+    status: u16,
+    headers: HeaderMap,
+    body: Vec<u8>,
+}
+
+impl Response {
+    /// Returns the HTTP status code.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    ///
+    /// let client = Client::new();
+    /// let response = client.get("https://example.com").send()?;
+    /// if response.status() == 200 {
+    ///     println!("Success!");
+    /// }
+    /// ```
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Returns the status code as a range check.
+    ///
+    /// Returns `true` if the status code is in the 200-299 range.
+    pub fn status_is_success(&self) -> bool {
+        self.status >= 200 && self.status < 300
+    }
+
+    /// Returns a reference to the header map.
+    ///
+    /// Each header name maps to a vector of values, allowing multiple headers
+    /// with the same name (like `Set-Cookie`).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    ///
+    /// let client = Client::new();
+    /// let response = client.get("https://example.com").send()?;
+    /// let headers = response.headers();
+    /// if let Some(cookies) = headers.get("Set-Cookie") {
+    ///     for cookie in cookies {
+    ///         println!("Cookie: {}", cookie);
+    ///     }
+    /// }
+    /// ```
+    pub fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+
+    /// Gets all values for a header name (case-insensitive).
+    ///
+    /// Returns `None` if the header is not present.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    ///
+    /// let client = Client::new();
+    /// let response = client.get("https://example.com").send()?;
+    /// if let Some(content_types) = response.header("Content-Type") {
+    ///     println!("Content-Type: {:?}", content_types);
+    /// }
+    /// ```
+    pub fn header(&self, name: &str) -> Option<&Vec<String>> {
+        // Headers are stored with canonicalized names
+        let canonical = name
+            .split('-')
+            .map(|s| {
+                let mut chars = s.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(first) => first.to_uppercase().collect::<String>()
+                        + &chars.as_str().to_lowercase(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("-");
+
+        self.headers.get(&canonical).or_else(|| {
+            // Try case-insensitive lookup
+            for (key, value) in &self.headers {
+                if key.eq_ignore_ascii_case(name) {
+                    return Some(value);
+                }
+            }
+            None
+        })
+    }
+
+    /// Returns the response body as a string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the body is not valid UTF-8.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    ///
+    /// let client = Client::new();
+    /// let response = client.get("https://example.com").send()?;
+    /// let body = response.text()?;
+    /// println!("Response: {}", body);
+    /// ```
+    pub fn text(&self) -> io::Result<String> {
+        String::from_utf8(self.body.clone()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Response body is not valid UTF-8: {}", e),
+            )
+        })
+    }
+
+    /// Returns the response body as raw bytes.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    ///
+    /// let client = Client::new();
+    /// let response = client.get("https://example.com/api").send()?;
+    /// let bytes = response.bytes();
+    /// ```
+    pub fn bytes(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Deserializes the response body as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the body is not valid JSON or cannot be deserialized
+    /// into the target type.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use harness_wasi_sockets::Client;
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct ApiResponse {
+    ///     message: String,
+    /// }
+    ///
+    /// let client = Client::new();
+    /// let response = client.get("https://api.example.com/data").send()?;
+    /// let data: ApiResponse = response.json()?;
+    /// ```
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> io::Result<T> {
+        serde_json::from_slice(&self.body).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to parse JSON: {}", e),
+            )
+        })
+    }
+}

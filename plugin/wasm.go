@@ -2,10 +2,13 @@ package plugin
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
 	"net"
+	"net/http"
+	"strings"
 	"time"
 
 	extism "github.com/extism/go-sdk"
@@ -58,6 +61,8 @@ func (wl *WASMLoader) Load(data []byte, name string) (Plugin, error) {
 		// ICMP functions - imported from "env" module
 		newICMPSendFunction(),
 		newICMPRecvFunction(),
+		// HTTP functions - imported from "env" module
+		newHttpRequestFunction(),
 	}
 
 	plugin, err := extism.NewPlugin(ctx, manifest, config, hostFunctions)
@@ -707,6 +712,159 @@ func newICMPRecvFunction() extism.HostFunction {
 			p.Log(extism.LogLevelInfo, fmt.Sprintf("icmp_recv: received ICMP packet from %s (type=%d, code=%d)", addr, msg.Type, msg.Code))
 		},
 		[]extism.ValueType{extism.ValueTypeI32}, // timeout_ms: i32
+		[]extism.ValueType{extism.ValueTypeI64}, // json_offset: i64
+	)
+	fn.SetNamespace("env")
+	return fn
+}
+
+// newHttpRequestFunction creates a host function for making HTTP requests using Go's net/http.
+// WASM signature: (param i64 i64 i64 i64) -> i64 - method_offset, url_offset, headers_offset, body_offset -> json_offset
+func newHttpRequestFunction() extism.HostFunction {
+	fn := extism.NewHostFunctionWithStack(
+		"http_request",
+		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+			methodOffset := stack[0]  // i64
+			urlOffset := stack[1]     // i64
+			headersOffset := stack[2] // i64
+			bodyOffset := stack[3]    // i64
+
+			// Read method from plugin memory
+			method, err := p.ReadString(methodOffset)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("http_request: failed to read method: %v", err))
+				return
+			}
+
+			// Read URL from plugin memory
+			url, err := p.ReadString(urlOffset)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("http_request: failed to read URL: %v", err))
+				return
+			}
+
+			// Read headers JSON from plugin memory
+			var headersJSON []string
+			if headersOffset != 0 {
+				headersStr, err := p.ReadString(headersOffset)
+				if err != nil {
+					stack[0] = 0
+					p.Log(extism.LogLevelError, fmt.Sprintf("http_request: failed to read headers: %v", err))
+					return
+				}
+				if headersStr != "" {
+					if err := json.Unmarshal([]byte(headersStr), &headersJSON); err != nil {
+						stack[0] = 0
+						p.Log(extism.LogLevelError, fmt.Sprintf("http_request: failed to parse headers JSON: %v", err))
+						return
+					}
+				}
+			}
+
+			// Read body from plugin memory
+			var body []byte
+			if bodyOffset != 0 {
+				body, err = p.ReadBytes(bodyOffset)
+				if err != nil {
+					stack[0] = 0
+					p.Log(extism.LogLevelError, fmt.Sprintf("http_request: failed to read body: %v", err))
+					return
+				}
+			}
+
+			// Create HTTP request
+			var req *http.Request
+			var errReq error
+			if len(body) > 0 {
+				req, errReq = http.NewRequest(method, url, strings.NewReader(string(body)))
+			} else {
+				req, errReq = http.NewRequest(method, url, nil)
+			}
+			if errReq != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("http_request: failed to create request: %v", errReq))
+				return
+			}
+
+			// Parse and set headers
+			// Headers are provided as JSON array of strings like ["Header-Name: value"]
+			for _, headerStr := range headersJSON {
+				if idx := strings.Index(headerStr, ":"); idx > 0 {
+					headerName := strings.TrimSpace(headerStr[:idx])
+					headerValue := strings.TrimSpace(headerStr[idx+1:])
+					req.Header.Add(headerName, headerValue)
+				}
+			}
+
+			// Create HTTP client with timeout
+			// Follow redirects by default (up to 10 redirects)
+			client := &http.Client{
+				Timeout: 10 * time.Second,
+			}
+
+			// Make HTTP request
+			resp, err := client.Do(req)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("http_request: failed to execute request: %v", err))
+				return
+			}
+			defer resp.Body.Close()
+
+			// Read response body
+			respBody := make([]byte, 0)
+			if resp.Body != nil {
+				bodyBuf := make([]byte, 64*1024) // 64KB buffer
+				for {
+					n, err := resp.Body.Read(bodyBuf)
+					if n > 0 {
+						respBody = append(respBody, bodyBuf[:n]...)
+					}
+					if err != nil {
+						break
+					}
+				}
+			}
+
+			// Build response with headers
+			// Headers map where each key maps to an array of values (to handle multiple headers with same name)
+			headersMap := make(map[string][]string)
+			for key, values := range resp.Header {
+				// Convert header names to canonical form but preserve original case for Set-Cookie
+				canonicalKey := http.CanonicalHeaderKey(key)
+				// Store all values for this header
+				headersMap[canonicalKey] = values
+			}
+
+			// Build JSON response
+			response := map[string]interface{}{
+				"status":  resp.StatusCode,
+				"headers": headersMap,
+				"body":    base64.StdEncoding.EncodeToString(respBody),
+			}
+
+			// Marshal to JSON
+			jsonBytes, err := json.Marshal(response)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("http_request: failed to marshal JSON: %v", err))
+				return
+			}
+
+			// Write JSON to plugin memory
+			jsonOffset, err := p.WriteBytes(jsonBytes)
+			if err != nil {
+				stack[0] = 0
+				p.Log(extism.LogLevelError, fmt.Sprintf("http_request: failed to write JSON to plugin memory: %v", err))
+				return
+			}
+
+			stack[0] = jsonOffset // Return i64 offset
+			p.Log(extism.LogLevelInfo, fmt.Sprintf("http_request: %s %s -> %d (body_len=%d)", method, url, resp.StatusCode, len(respBody)))
+		},
+		[]extism.ValueType{extism.ValueTypeI64, extism.ValueTypeI64, extism.ValueTypeI64, extism.ValueTypeI64}, // method_offset, url_offset, headers_offset, body_offset
 		[]extism.ValueType{extism.ValueTypeI64}, // json_offset: i64
 	)
 	fn.SetNamespace("env")
