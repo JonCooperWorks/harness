@@ -105,7 +105,7 @@ The harness provides raw network socket host functions to WASM plugins, enabling
 
 **Using the Rust std::net Polyfill**
 
-For Rust plugins, we provide a polyfill that wraps these raw host functions to provide a standard `std::net::TcpStream`, `std::net::UdpSocket`, and ICMP API. This makes it easier to write networking code using familiar Rust APIs:
+For Rust plugins, we provide a polyfill that wraps these raw host functions to provide a standard `std::net::TcpStream`, `std::net::UdpSocket`, ICMP API, and HTTP client. This makes it easier to write networking code using familiar Rust APIs:
 
 ```rust
 use harness_wasi_sockets::{TcpStream, UdpSocket, IcmpSocket, Client};
@@ -155,9 +155,94 @@ See [`polyfill/README.md`](polyfill/README.md) for complete documentation.
 
 > **Note:** ICMP functions require raw socket access, which typically requires root/administrator privileges or the `CAP_NET_RAW` capability on Linux. Without elevated privileges, ICMP operations will fail silently.
 
+**HTTP Client Polyfill**
+
+The polyfill includes an HTTP client with a reqwest-like API that uses Go's `net/http` on the host side. This properly handles all HTTP headers, including multiple `Set-Cookie` headers, which solves limitations of extism's built-in HTTP API.
+
+**Features:**
+- **Proper header handling** - All headers including multiple `Set-Cookie` headers are properly extracted
+- **Reqwest-like API** - Familiar API similar to the popular `reqwest` crate
+- **JSON support** - Built-in JSON serialization/deserialization
+- **Synchronous API** - Blocking requests for simplicity
+- **Uses Go's net/http** - Battle-tested HTTP implementation on the host side
+
+**Usage:**
+
+```rust
+use harness_wasi_sockets::Client;
+use serde_json::json;
+
+// Create a new HTTP client
+let client = Client::new();
+
+// GET request
+let response = client.get("https://example.com").send()?;
+println!("Status: {}", response.status());
+let body = response.text()?;
+
+// POST request with JSON
+let response = client.post("https://api.example.com/data")
+    .header("Authorization", "Bearer token123")
+    .json(&json!({"key": "value"}))
+    .send()?;
+
+let data: Value = response.json()?;
+
+// POST request with raw body
+let response = client.post("https://api.example.com/upload")
+    .header("Content-Type", "text/plain")
+    .body(b"Hello, world!".to_vec())
+    .send()?;
+
+// Access headers (properly handles multiple headers with same name)
+if let Some(cookies) = response.header("Set-Cookie") {
+    for cookie in cookies {
+        println!("Cookie: {}", cookie);
+    }
+}
+
+// Get all headers
+let headers = response.headers();
+for (name, values) in headers {
+    println!("{}: {:?}", name, values);
+}
+```
+
+**API Methods:**
+- `Client::new()` - Creates a new HTTP client
+- `Client::get(url)`, `post(url)`, `put(url)`, `delete(url)`, `patch(url)` - Creates request builders
+- `RequestBuilder::header(name, value)` - Adds a header to the request
+- `RequestBuilder::json(body)` - Sets the request body as JSON (automatically sets `Content-Type: application/json`)
+- `RequestBuilder::body(body)` - Sets the request body as raw bytes
+- `RequestBuilder::send()` - Sends the request and returns the response
+- `Response::status()` - Returns the HTTP status code
+- `Response::status_is_success()` - Returns `true` if status is 200-299
+- `Response::headers()` - Returns a reference to the header map
+- `Response::header(name)` - Gets all values for a header name (case-insensitive)
+- `Response::text()` - Returns the response body as a string
+- `Response::bytes()` - Returns the response body as raw bytes
+- `Response::json<T>()` - Deserializes the response body as JSON
+
+**How It Works:**
+
+The HTTP client uses a host function that calls Go's `net/http`:
+
+1. **Request building** - The Rust code builds a request with method, URL, headers, and body
+2. **Host function call** - The request is serialized to JSON and passed to the `http_request` host function
+3. **Go net/http execution** - The host function uses Go's `net/http` to make the actual HTTP request
+4. **Response parsing** - The response (status, headers, body) is returned as JSON and parsed into Rust types
+
+This approach ensures that all headers, including multiple `Set-Cookie` headers, are properly handled by Go's battle-tested HTTP implementation.
+
+**Limitations:**
+- **Synchronous only** - All requests are blocking (no async support)
+- **10 second timeout** - Requests timeout after 10 seconds
+- **Redirects are followed** - Up to 10 redirects are followed automatically (as per Go's default)
+- **Base64 body encoding** - Response bodies are base64-encoded in transport (handled transparently)
+
 All address and data parameters are memory offsets in the plugin's memory space. Use `Memory::new()` to allocate and write data, then pass the memory offset to the host functions.
 
-**Note:** For Rust plugins, we recommend using the [`harness-wasi-sockets` polyfill](polyfill/README.md) instead of calling these raw functions directly. The polyfill provides a standard `std::net::TcpStream`, `std::net::UdpSocket`, and ICMP API that's easier to use and maintain.
+**Note:** For Rust plugins, we recommend using the [`harness-wasi-sockets` polyfill](polyfill/README.md) instead of calling these raw functions directly. The polyfill provides a standard `std::net::TcpStream`, `std::net::UdpSocket`, ICMP API, and HTTP client that's easier to use and maintain.
 
 **Example usage with raw host functions (not recommended for Rust):**
 ```rust
