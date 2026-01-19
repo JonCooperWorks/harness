@@ -1,0 +1,43 @@
+{
+	"name": "Harness Dev Container",
+	"build": {
+		"dockerfile": "Dockerfile",
+		"context": ".."
+	},
+	
+	// Features to add to the dev container. More info: https://containers.dev/features
+	"features": {},
+	
+	// Use 'forwardPorts' to make a list of ports inside the container available locally.
+	// "forwardPorts": [],
+	
+	// Use 'postCreateCommand' to run commands after the container is created.
+	"postCreateCommand": "go mod download",
+	
+	// Configure tool-specific properties.
+	"customizations": {
+		// Configure properties specific to VS Code.
+		"vscode": {
+			// Add the IDs of extensions you want installed when the container is created.
+			"extensions": [
+				"golang.go",
+				"rust-lang.rust-analyzer",
+				"vadimcn.vscode-lldb"
+			],
+			"settings": {
+				"go.goroot": "/usr/local/go",
+				"go.toolsManagement.checkForUpdates": "local",
+				"rust-analyzer.checkOnSave.command": "clippy"
+			}
+		}
+	},
+	
+	// Comment out to connect as root instead. More info: https://aka.ms/vscode-remote/containers/non-root.
+	"remoteUser": "vscode",
+	
+	"remoteEnv": {
+		"PATH": "${containerEnv:PATH}:/usr/local/go/bin:${containerEnv:HOME}/.cargo/bin",
+		"RUSTUP_HOME": "${containerEnv:HOME}/.rustup",
+		"CARGO_HOME": "${containerEnv:HOME}/.cargo"
+	}
+}
