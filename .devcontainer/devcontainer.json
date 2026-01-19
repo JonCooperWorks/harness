@@ -12,7 +12,7 @@
 	// "forwardPorts": [],
 	
 	// Use 'postCreateCommand' to run commands after the container is created.
-	"postCreateCommand": "go mod download",
+	"postCreateCommand": "go mod download && mkdir -p ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/* 2>/dev/null || true",
 	
 	// Configure tool-specific properties.
 	"customizations": {
@@ -34,6 +34,11 @@
 	
 	// Comment out to connect as root instead. More info: https://aka.ms/vscode-remote/containers/non-root.
 	"remoteUser": "vscode",
+	
+	// Mount SSH keys from host for git operations
+	"mounts": [
+		"source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/home/vscode/.ssh,type=bind,consistency=cached"
+	],
 	
 	"remoteEnv": {
 		"PATH": "${containerEnv:PATH}:/usr/local/go/bin:${containerEnv:HOME}/.cargo/bin",

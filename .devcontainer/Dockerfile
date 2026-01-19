@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	# Linux keystore support (libsecret for Linux keyring)
 	libsecret-1-dev \
 	libdbus-1-dev \
+	# SSH client for git operations
+	openssh-client \
 	# Other useful tools
 	sudo \
 	wget \
